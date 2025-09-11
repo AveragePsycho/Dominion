@@ -22,9 +22,8 @@ window.onload = function() {
     let isReady = false;
     let players = [];
     
-    // --- NEW: Client-side animation state ---
-    let clientMoves = {};
-    let lastRenderTime = performance.now();
+    // --- Client-side animation state ---
+    let lastServerUpdate = performance.now();
 
 
     const camera = { x: 0, y: 0, zoom: 1.0, minZoom: 0.3, maxZoom: 3.0 };
@@ -49,6 +48,7 @@ window.onload = function() {
             activeTimelineId = Object.keys(newState.multiverse)[0] || 'timeline-alpha';
         }
         localGameState = newState;
+        lastServerUpdate = performance.now(); // Reset timer on each update
         updatePlayerListView();
     });
     
@@ -167,8 +167,8 @@ window.onload = function() {
             }
         }
         
-        // --- LAG FIX: Use client-side interpolation for smooth movement ---
-        const tickDurationMs = GAME_TICK_MS * (Object.keys(localGameState.multiverse).length || 1);
+        const activeTimelinesCount = Object.keys(localGameState.multiverse).filter(id => !localGameState.multiverse[id].isFrozen).length || 1;
+        const tickDurationMs = GAME_TICK_MS * activeTimelinesCount;
         const segmentDuration = tickDurationMs * MOVE_TICKS;
         
         for (const move of activeGameState.moves) {
@@ -181,11 +181,10 @@ window.onload = function() {
             const segmentEnd = move.path[move.pathIndex + 1];
             if(!segmentStart || !segmentEnd) continue;
 
-            // Calculate interpolation fraction based on real time
-            const serverProgressFraction = move.progress / MOVE_TICKS;
-            const timeSinceLastTick = Math.min(performance.now() - lastRenderTime, tickDurationMs);
-            const tickProgressFraction = timeSinceLastTick / tickDurationMs;
-            const totalFraction = Math.min((serverProgressFraction + tickProgressFraction) / MOVE_TICKS, 1.0);
+            // --- LAG FIX: Interpolate position based on time since last server update ---
+            const timeSinceUpdate = performance.now() - lastServerUpdate;
+            const progressInSegment = (GAME_TICK_MS * move.progress) + timeSinceUpdate;
+            const totalFraction = Math.min(progressInSegment / segmentDuration, 1.0);
 
             const startX = (segmentStart.col * TILE_SIZE) + (TILE_SIZE / 2);
             const startY = (segmentStart.row * TILE_SIZE) + (TILE_SIZE / 2);
@@ -406,7 +405,6 @@ window.onload = function() {
 
     // --- 5. GAME LOOPS ---
     function animationLoop() {
-        lastRenderTime = performance.now();
         render();
         requestAnimationFrame(animationLoop);
     }
