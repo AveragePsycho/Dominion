@@ -1,0 +1,20 @@
+Hello Friend,
+
+Ready to break your brain?
+
+Welcome to Dominion, my incredibly fuckass spin on Generals.IO, with time travel.
+
+Real Time, Time Strategy, for those who crave migraines.
+
+
+Running the project as a local host:
+
+Requirements:
+Node JS
+Socket.IO
+ngrok
+
+
+Step 1: >CD to dominions directory and run .node server.js
+Step 2: >Check that you're actually hosting to http://localhost:3000/, if not something borked and I'm deeply sorry.
+Step 3: >Assuming you've actually installed ngrok properly run ngrok http http://localhost:3000/, copy the link it creates and send it to your friends, congratulations you're hosting Dominion!

@@ -1,0 +1,125 @@
+// game.js
+
+// Wait until the page is fully loaded
+window.onload = function() {
+    console.log("Game script loaded!");
+
+    // --- 1. GAME CONSTANTS & STATE ---
+    
+    // Board dimensions
+    const TILE_SIZE = 20; // Each tile is 20x20 pixels
+    const BOARD_COLS = 40;
+    const BOARD_ROWS = 30;
+
+    // Game speed
+    const GAME_TICK_MS = 500; // 500ms = 2 steps per second
+
+    // Tile Types (using an object for clarity instead of magic numbers)
+    const TILE_TYPE = {
+        EMPTY: 0,
+        MOUNTAIN: 1,
+        CITY: 2,
+        GENERAL: 3,
+    };
+
+    // Player Colors
+    const PLAYER_COLORS = {
+        0: '#333333', // Neutral color for empty land/cities
+        1: '#007bff', // Player 1 (Blue)
+        2: '#dc3545', // Player 2 (Red)
+        // Add more player colors as needed
+    };
+
+    // Get a reference to the canvas and its 2D rendering context
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+
+    // Set the canvas size based on our constants
+    canvas.width = BOARD_COLS * TILE_SIZE;
+    canvas.height = BOARD_ROWS * TILE_SIZE;
+
+    // The central object holding the entire state of the game
+    let gameState = {
+        board: [],      // This will be our 2D array of tiles
+        players: [],    // Info about each player
+        gameStep: 0,    // The current game tick count
+    };
+
+	function initializeGame() {
+    console.log("Initializing new game...");
+    const newBoard = [];
+    for (let row = 0; row < BOARD_ROWS; row++) {
+        const currentRow = [];
+        for (let col = 0; col < BOARD_COLS; col++) {
+            // Create a default tile object
+            const tile = {
+                type: TILE_TYPE.EMPTY,
+                ownerId: 0, // 0 is neutral
+                army: 0,
+            };
+
+            // Randomly add some mountains
+            if (Math.random() < 0.1) { // 10% chance
+                tile.type = TILE_TYPE.MOUNTAIN;
+            }
+            
+            currentRow.push(tile);
+        }
+        newBoard.push(currentRow);
+    }
+    
+    // TODO: Add fair placement for cities and generals
+    // For now, let's just place two generals manually
+    
+    // Player 1 General
+    newBoard[5][5].type = TILE_TYPE.GENERAL;
+    newBoard[5][5].ownerId = 1;
+    newBoard[5][5].army = 1;
+
+    // Player 2 General
+    const p2_row = BOARD_ROWS - 6;
+    const p2_col = BOARD_COLS - 6;
+    newBoard[p2_row][p2_col].type = TILE_TYPE.GENERAL;
+    newBoard[p2_row][p2_col].ownerId = 2;
+    newBoard[p2_row][p2_col].army = 1;
+
+    gameState.board = newBoard;
+    gameState.gameStep = 0;
+    // We could add player info to gameState.players here if needed
+	}
+	
+	function render() {
+    // Clear the entire canvas before drawing the new frame
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    for (let row = 0; row < BOARD_ROWS; row++) {
+        for (let col = 0; col < BOARD_COLS; col++) {
+            const tile = gameState.board[row][col];
+            const x = col * TILE_SIZE;
+            const y = row * TILE_SIZE;
+
+            // Set the tile color based on the owner
+            ctx.fillStyle = PLAYER_COLORS[tile.ownerId] || '#FFFFFF'; // Default to white if ownerId is unknown
+
+            // Draw the tile background
+            if (tile.type !== TILE_TYPE.MOUNTAIN) {
+                ctx.fillRect(x, y, TILE_SIZE - 1, TILE_SIZE - 1); // -1 to create a grid effect
+            } else {
+                // Draw mountains differently (e.g., darker grey)
+                ctx.fillStyle = '#555555';
+                ctx.fillRect(x, y, TILE_SIZE - 1, TILE_SIZE - 1);
+            }
+
+            // Draw the army count if it's greater than 0 and not a mountain
+            if (tile.army > 0 && tile.type !== TILE_TYPE.MOUNTAIN) {
+                ctx.fillStyle = '#FFFFFF'; // White text
+                ctx.font = `bold ${TILE_SIZE / 2}px sans-serif`;
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(tile.army, x + TILE_SIZE / 2, y + TILE_SIZE / 2);
+            }
+        }
+    }
+	}
+    // --- THE REST OF OUR CODE WILL GO HERE ---
+};

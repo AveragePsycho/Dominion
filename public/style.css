@@ -1,0 +1,79 @@
+body {
+    background-color: #1a1a1a;
+    color: #f0f0f0;
+    font-family: sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    margin: 0;
+    height: 100vh;
+    overflow: hidden; /* Prevents scrollbars */
+}
+
+#top-bar {
+    width: 100%;
+    text-align: center;
+    padding: 5px 0;
+}
+
+#game-container {
+    display: flex;
+    flex-direction: row;
+    justify-content: center;
+    align-items: flex-start;
+    gap: 20px;
+    width: 100%;
+}
+
+#left-panel, #timeline-list-container {
+    padding: 10px;
+    background-color: #2a2a2a;
+    border-radius: 5px;
+}
+
+#timeline-controls button, #ready-btn {
+    display: block;
+    width: 100%;
+    margin-bottom: 5px;
+    padding: 8px;
+    background-color: #007bff;
+    border: none;
+    color: white;
+    cursor: pointer;
+}
+#timeline-controls button:hover, #ready-btn:hover {
+    background-color: #0056b3;
+}
+
+#ready-btn.ready {
+    background-color: #28a745; /* Green when ready */
+}
+#ready-btn.ready:hover {
+    background-color: #218838;
+}
+
+
+#canvas-container {
+    position: relative;
+}
+
+canvas {
+    border: 2px solid #555;
+    background-color: #000;
+    display: block; /* Removes extra space below canvas */
+}
+
+#game-status {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    font-size: 3em;
+    color: gold;
+    text-shadow: 2px 2px 4px #000;
+    pointer-events: none; /* Allows clicks to go through to the canvas */
+}
+
+#player-list div {
+    padding: 2px 0;
+}

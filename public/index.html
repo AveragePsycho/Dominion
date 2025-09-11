@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dominion</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="top-bar">
+        <h1>Dominion</h1>
+        <div id="player-id-display" style="font-weight: bold;">Connecting...</div>
+    </div>
+
+    <div id="game-container">
+        <div id="left-panel">
+            <div id="player-list-container">
+                <div id="player-list"></div>
+                <button id="ready-btn">Ready Up</button>
+            </div>
+            <div id="timeline-controls">
+                <h3>Timeline Controls</h3>
+                <button id="split-timeline-btn">Split Timeline (Cost: 50)</button>
+                <button id="freeze-timeline-btn">Freeze Timeline (Cost: 30)</button>
+                <button id="overclock-timeline-btn">Overclock Timeline (Cost: 40)</button>
+                <button id="rollback-timeline-btn">Rollback Timeline (Cost: 60)</button>
+                <button id="anchor-timeline-btn">Anchor Timeline (Cost: 25)</button>
+                <button id="hop-timeline-btn">Open Portal (Cost: 75)</button>
+            </div>
+             <label>
+                <input type="checkbox" id="fogToggle" checked>
+                Enable Fog of War
+            </label>
+        </div>
+
+        <div id="canvas-container">
+            <div id="game-status"></div>
+            <canvas id="gameCanvas"></canvas>
+        </div>
+
+        <div id="timeline-list-container">
+            <h2>Active Timelines</h2>
+            <ul id="timeline-list" style="list-style-type: none; padding: 0;">
+                </ul>
+        </div>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="client.js"></script>
+</body>
+</html>
