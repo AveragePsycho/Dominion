@@ -11,8 +11,8 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 let BOARD_COLS = 40, BOARD_ROWS = 30;
 const GAME_TICK_MS = 500, MOVE_TICKS = 2, KEYFRAME_INTERVAL = 60;
-const TIME_ACTION_COST = { SPLIT: 50, FREEZE: 30, OVERCLOCK: 40, ROLLBACK: 60, ANCHOR: 25, HOP: 75 };
-const TIME_ACTION_DURATION = { FREEZE_TICKS: 20, OVERCLOCK_TICKS: 20, ROLLBACK_TICKS: 10, HOP_TICKS: 30 };
+const TIME_ACTION_COST = { SPLIT: 50, FREEZE: 30, OVERCLOCK: 40, ANCHOR: 25, HOP: 75 };
+const TIME_ACTION_DURATION = { FREEZE_TICKS: 20, OVERCLOCK_TICKS: 20, HOP_TICKS: 30 };
 const TILE_TYPE = { EMPTY: 0, MOUNTAIN: 1, CITY: 2, GENERAL: 3, FOREST: 4 };
 const PLAYER_COLORS = ['#007bff', '#dc3545', '#28a745', '#ffc107', '#17a2b8', '#6f42c1', '#fd7e14', '#e83e8c'];
 let game = createNewGame();
@@ -30,7 +30,6 @@ function calculateMapDimensions(playerCount) {
     const ratio = 16 / 9;
     const newCols = Math.round(Math.sqrt(requiredArea * ratio));
     const newRows = Math.round(newCols / ratio);
-    console.log(`New dimensions for ${playerCount} players: ${newCols}x${newRows}`);
     return { cols: newCols, rows: newRows };
 }
 
@@ -58,14 +57,13 @@ function generateSpawnPoints(boardDimensions, playerCount) {
 }
 
 function initializeGame(game) {
-    console.log("Initializing new game state...");
     game.boardDimensions = calculateMapDimensions(game.playerCount);
     const { cols, rows } = game.boardDimensions;
     BOARD_COLS = cols; BOARD_ROWS = rows;
     const initialGameState = { board: [], gameStep: 0, moves: [] };
     const newBoard = [];
     for (let row = 0; row < rows; row++) {
-        const currentRow = []; // --- BUG FIX: currentRow must be defined inside the loop ---
+        const currentRow = [];
         for (let col = 0; col < cols; col++) {
             const tile = { type: TILE_TYPE.EMPTY, ownerId: 0, army: 0 };
             if (Math.random() < 0.1) { tile.type = TILE_TYPE.MOUNTAIN; }
@@ -100,36 +98,38 @@ function initializeGame(game) {
         isFrozen: false, freezeUntilStep: 0, overclockUntilStep: 0,
         speedMultiplier: 1.0, anchorStep: 0, parentId: null, splitStep: 0,
     };
-    console.log("Game initialized.");
     game.isGameRunning = true;
     io.emit('game-start');
 }
 
-function runSingleTickLogic(currentGameState) {
+function runSingleTickLogic(currentGameState, timelineId, game) {
     for (let i = currentGameState.moves.length - 1; i >= 0; i--) {
         const move = currentGameState.moves[i];
         move.progress++;
 
         if (move.progress >= MOVE_TICKS) {
             move.progress = 0;
+            const isFinalStep = move.pathIndex >= move.path.length - 1;
 
-            const leavingPos = move.path[move.pathIndex];
-            const leavingTile = currentGameState.board[leavingPos.row][leavingPos.col];
+            if (!isFinalStep) {
+                const leavingPos = move.path[move.pathIndex];
+                const leavingTile = currentGameState.board[leavingPos.row][leavingPos.col];
 
-            if (leavingTile.ownerId === move.ownerId) {
-                move.army += leavingTile.army - 1;
-                leavingTile.army = 1;
+                if (leavingTile.ownerId === move.ownerId) {
+                    move.army += leavingTile.army - 1;
+                    leavingTile.army = 1;
+                }
+                 move.pathIndex++;
             }
-
-            move.pathIndex++;
+           
             const arrivingPos = move.path[move.pathIndex];
-            if (!arrivingPos) { 
-                currentGameState.moves.splice(i, 1);
-                continue;
-            }
             const arrivingTile = currentGameState.board[arrivingPos.row][arrivingPos.col];
 
-            const isFinalStep = move.pathIndex >= move.path.length - 1;
+            const propagateTag = () => {
+                if (move.causalityTag) {
+                    arrivingTile.causalityTag = move.causalityTag;
+                }
+            };
 
             if (arrivingTile.ownerId !== move.ownerId) { 
                 if (move.army > arrivingTile.army) {
@@ -139,6 +139,7 @@ function runSingleTickLogic(currentGameState) {
                     }
                     arrivingTile.ownerId = move.ownerId;
                     arrivingTile.army = move.army;
+                    propagateTag();
 
                     if (!isFinalStep) {
                         if (move.army > 1) {
@@ -148,9 +149,6 @@ function runSingleTickLogic(currentGameState) {
                             currentGameState.moves.splice(i, 1);
                             continue;
                         }
-                    } else { 
-                        currentGameState.moves.splice(i, 1);
-                        continue;
                     }
                 } else { 
                     arrivingTile.army -= move.army;
@@ -158,11 +156,30 @@ function runSingleTickLogic(currentGameState) {
                     continue;
                 }
             } else { 
-                if (isFinalStep) { 
+                if (isFinalStep) {
                     arrivingTile.army += move.army;
-                    currentGameState.moves.splice(i, 1);
-                    continue;
+                    propagateTag();
                 }
+            }
+            
+            if (isFinalStep) {
+                const portal = game.portals.find(p => p.fromTimelineId === timelineId && p.coords.row === arrivingPos.row && p.coords.col === arrivingPos.col);
+                if (portal) {
+                    const toTimeline = game.multiverse[portal.toTimelineId];
+                    if (toTimeline) {
+                        const exitTile = findValidAdjacentTile(portal.coords, toTimeline.currentState);
+                        if (exitTile) {
+                            const newPath = [exitTile]; 
+                            const causalityTag = { originTimelineId: timelineId, originStep: currentGameState.gameStep };
+                            
+                            const newMove = { ownerId: move.ownerId, army: move.army, path: newPath, pathIndex: 0, progress: 0, causalityTag };
+                            toTimeline.currentState.moves.push(newMove);
+                        } else {
+                            arrivingTile.army += move.army;
+                        }
+                    }
+                }
+                currentGameState.moves.splice(i, 1);
             }
         }
     }
@@ -182,6 +199,7 @@ function runSingleTickLogic(currentGameState) {
     }
 }
 
+
 function applyAction(gameState, action) {
     const { type, playerId } = action;
     const generalInfo = findGeneral(playerId, gameState);
@@ -193,7 +211,9 @@ function applyAction(gameState, action) {
             const movingArmy = startTile.army - 1;
             startTile.army = 1;
             const newMove = { ownerId: playerId, army: movingArmy, path: action.path, pathIndex: 0, progress: 0 };
-            if (startTile.causalityTag) { newMove.causalityTag = startTile.causalityTag; }
+            if (startTile.causalityTag) { 
+                newMove.causalityTag = startTile.causalityTag; 
+            }
             gameState.moves.push(newMove);
             break;
         case 'SPLIT':
@@ -214,12 +234,44 @@ function applyAction(gameState, action) {
     }
 }
 
+function calculatePlayerStats(game) {
+    const stats = { global: {} };
+     for (const playerSocketId in game.players) {
+        const player = game.players[playerSocketId];
+        stats.global[player.id] = { army: 0 };
+    }
+
+    for (const timelineId in game.multiverse) {
+        stats[timelineId] = {};
+        for (const playerSocketId in game.players) {
+            const player = game.players[playerSocketId];
+            stats[timelineId][player.id] = { army: 0 };
+        }
+        
+        const gameState = game.multiverse[timelineId].currentState;
+        for (let row = 0; row < BOARD_ROWS; row++) {
+            for (let col = 0; col < BOARD_COLS; col++) {
+                const tile = gameState.board[row][col];
+                if (tile.ownerId !== 0 && stats[timelineId][tile.ownerId]) {
+                    stats[timelineId][tile.ownerId].army += tile.army;
+                    stats.global[tile.ownerId].army += tile.army;
+                }
+            }
+        }
+        for (const move of gameState.moves) {
+            if (move.ownerId !== 0 && stats[timelineId][move.ownerId]) {
+                stats[timelineId][move.ownerId].army += move.army;
+                stats.global[move.ownerId].army += move.army;
+            }
+        }
+    }
+    return stats;
+}
 
 function gameLoop(game) {
     const activePlayers = new Set();
     for (const timelineId in game.multiverse) {
-        const timeline = game.multiverse[timelineId];
-        const currentGameState = timeline.currentState;
+        const currentGameState = game.multiverse[timelineId].currentState;
         for (let row = 0; row < BOARD_ROWS; row++) {
             for (let col = 0; col < BOARD_COLS; col++) {
                 const tile = currentGameState.board[row][col];
@@ -232,12 +284,10 @@ function gameLoop(game) {
 
     if (activePlayers.size <= 1 && game.playerCount > 1 && game.isGameRunning) {
         const winnerId = activePlayers.values().next().value || "No one";
-        console.log(`Game over! Winner is Player ${winnerId}`);
         io.emit('game-over', { winnerId });
         clearTimeout(game.gameInterval);
         game.isGameRunning = false;
         setTimeout(() => {
-            console.log("Resetting game state for new match.");
             const connectedSockets = new Map(io.sockets.sockets);
             game = createNewGame();
             let i = 1;
@@ -269,14 +319,14 @@ function gameLoop(game) {
             timeline.overclockUntilStep = 0;
         }
         for (let i = 0; i < timeline.speedMultiplier; i++) {
-            updateTimeline(timeline);
+            updateTimeline(timeline, timelineId, game);
         }
     }
 }
-function updateTimeline(timeline) {
-    if (timeline.isFrozen) { timeline.currentState.gameStep++; return; }
 
-    runSingleTickLogic(timeline.currentState);
+function updateTimeline(timeline, timelineId, game) {
+    if (timeline.isFrozen) { timeline.currentState.gameStep++; return; }
+    runSingleTickLogic(timeline.currentState, timelineId, game);
 
     if (timeline.currentState.gameStep % KEYFRAME_INTERVAL === 0) {
         timeline.keyframes.push({
@@ -288,7 +338,9 @@ function updateTimeline(timeline) {
         }
     }
 }
+
 function paradoxHandler(game) { for (const timelineId in game.multiverse) { const timeline = game.multiverse[timelineId]; const currentGameState = timeline.currentState; for (let row = 0; row < BOARD_ROWS; row++) { for (let col = 0; col < BOARD_COLS; col++) { const tile = currentGameState.board[row][col]; if (tile.causalityTag) { const origin = game.multiverse[tile.causalityTag.originTimelineId]; if (!origin || origin.currentState.gameStep < tile.causalityTag.originStep) { tile.army = 0; delete tile.causalityTag; game.paradoxEvents.push({ timelineId, coords: { row, col }, duration: 10 }); } } } } for (let i = currentGameState.moves.length - 1; i >= 0; i--) { const move = currentGameState.moves[i]; if (move.causalityTag) { const origin = game.multiverse[move.causalityTag.originTimelineId]; if (!origin || origin.currentState.gameStep < move.causalityTag.originStep) { const coords = move.path[move.pathIndex]; game.paradoxEvents.push({ timelineId, coords, duration: 10 }); currentGameState.moves.splice(i, 1); } } } } }
+
 function splitTimeline(playerId, activeTimelineId, game) {
     const timeline = game.multiverse[activeTimelineId];
     if (!timeline) return;
@@ -310,6 +362,7 @@ function splitTimeline(playerId, activeTimelineId, game) {
         speedMultiplier: 1.0, anchorStep: newGameState.gameStep, parentId: activeTimelineId, splitStep: timeline.currentState.gameStep,
     };
 }
+
 function freezeTimeline(playerId, activeTimelineId, game) {
     const timeline = game.multiverse[activeTimelineId];
     if (!timeline) return;
@@ -323,6 +376,7 @@ function freezeTimeline(playerId, activeTimelineId, game) {
     timeline.freezeUntilStep = timeline.currentState.gameStep + TIME_ACTION_DURATION.FREEZE_TICKS;
     timeline.isFrozen = true;
 }
+
 function overclockTimeline(playerId, activeTimelineId, game) {
     const timeline = game.multiverse[activeTimelineId];
     if (!timeline) return;
@@ -336,6 +390,7 @@ function overclockTimeline(playerId, activeTimelineId, game) {
     timeline.overclockUntilStep = timeline.currentState.gameStep + TIME_ACTION_DURATION.OVERCLOCK_TICKS;
     timeline.speedMultiplier = 2.0;
 }
+
 function rollbackTimeline(playerId, activeTimelineId, targetStep, game) {
     const timeline = game.multiverse[activeTimelineId];
     if (!timeline) return;
@@ -343,7 +398,7 @@ function rollbackTimeline(playerId, activeTimelineId, targetStep, game) {
     if (targetStep < timeline.anchorStep || targetStep >= timeline.currentState.gameStep) return;
 
     const lastKeyframe = [...timeline.keyframes].reverse().find(kf => kf.step <= targetStep);
-    if (!lastKeyframe) { console.log("Rollback failed: No valid keyframe found."); return; }
+    if (!lastKeyframe) { return; }
 
     let preSimState = JSON.parse(JSON.stringify(lastKeyframe.gameState));
     const actionsToReplay = timeline.actions.filter(a => a.step > lastKeyframe.step && a.step <= targetStep);
@@ -354,7 +409,7 @@ function rollbackTimeline(playerId, activeTimelineId, targetStep, game) {
                 applyAction(preSimState, actionRecord.action);
             }
         }
-        runSingleTickLogic(preSimState);
+        runSingleTickLogic(preSimState, activeTimelineId, game);
     }
 
     const generalInPast = findGeneral(playerId, preSimState);
@@ -362,20 +417,16 @@ function rollbackTimeline(playerId, activeTimelineId, targetStep, game) {
     const rollbackCost = Math.floor(10 * Math.pow(1.05, stepsToRollback / 10));
 
     if (!generalInPast || generalInPast.tile.army < rollbackCost) {
-        console.log(`Player ${playerId} failed rollback: Not enough army at step ${targetStep}. Required: ${rollbackCost}, Had: ${generalInPast ? generalInPast.tile.army : 0}`);
         return;
     }
-
-    console.log(`Rolling back timeline ${activeTimelineId} to ${targetStep}. Cost: ${rollbackCost}`);
     
     generalInPast.tile.army -= rollbackCost;
     
     timeline.currentState = preSimState;
     timeline.actions = timeline.actions.filter(a => a.step <= targetStep);
     timeline.keyframes = timeline.keyframes.filter(kf => kf.step <= targetStep);
-    
-    console.log(`Rollback complete. New state at step ${timeline.currentState.gameStep}`);
 }
+
 function anchorTimeline(playerId, activeTimelineId, game) {
     const timeline = game.multiverse[activeTimelineId];
     if (!timeline) return;
@@ -388,7 +439,28 @@ function anchorTimeline(playerId, activeTimelineId, game) {
 
     timeline.anchorStep = timeline.currentState.gameStep;
 }
-function openPortal(playerId, activeTimelineId, selectedTile, game) { const fromTimeline = game.multiverse[activeTimelineId]; if (!fromTimeline || !selectedTile) return; const fromGameState = fromTimeline.currentState; const portalTile = fromGameState.board[selectedTile.row][selectedTile.col]; if (portalTile.ownerId !== playerId) return; const generalInfo = findGeneral(playerId, fromGameState); if (!generalInfo || generalInfo.tile.army < TIME_ACTION_COST.HOP) return; const targetableTimelines = Object.keys(game.multiverse).filter(id => id !== activeTimelineId); if (targetableTimelines.length === 0) return; generalInfo.tile.army -= TIME_ACTION_COST.HOP; const toTimelineId = targetableTimelines[0]; const portalCoords = { row: selectedTile.row, col: selectedTile.col }; const expiresOnStep = fromGameState.gameStep + TIME_ACTION_DURATION.HOP_TICKS; game.portals.push({ fromTimelineId: activeTimelineId, toTimelineId: toTimelineId, coords: portalCoords, expiresOnStep: expiresOnStep }); game.portals.push({ fromTimelineId: toTimelineId, toTimelineId: activeTimelineId, coords: portalCoords, expiresOnStep: expiresOnStep }); }
+
+function openPortal(playerId, activeTimelineId, selectedTile, game) {
+    const fromTimeline = game.multiverse[activeTimelineId];
+    if (!fromTimeline || !selectedTile) return;
+    const fromGameState = fromTimeline.currentState;
+    const portalTile = fromGameState.board[selectedTile.row][selectedTile.col];
+    if (portalTile.ownerId !== playerId) return;
+    const generalInfo = findGeneral(playerId, fromGameState);
+    if (!generalInfo || generalInfo.tile.army < TIME_ACTION_COST.HOP) return;
+    const targetableTimelines = Object.keys(game.multiverse).filter(id => id !== activeTimelineId);
+    if (targetableTimelines.length === 0) return;
+    
+    const action = { type: 'HOP', playerId };
+    fromTimeline.actions.push({ step: fromGameState.gameStep, action });
+    applyAction(fromGameState, action);
+
+    const toTimelineId = targetableTimelines[0];
+    const portalCoords = { row: selectedTile.row, col: selectedTile.col };
+    const expiresOnStep = fromGameState.gameStep + TIME_ACTION_DURATION.HOP_TICKS;
+    game.portals.push({ fromTimelineId: activeTimelineId, toTimelineId: toTimelineId, coords: portalCoords, expiresOnStep: expiresOnStep });
+    game.portals.push({ fromTimelineId: toTimelineId, toTimelineId: activeTimelineId, coords: portalCoords, expiresOnStep: expiresOnStep });
+}
 
 function processMove(playerId, path, activeTimelineId, game) {
     const timeline = game.multiverse[activeTimelineId];
@@ -409,7 +481,6 @@ function processMove(playerId, path, activeTimelineId, game) {
         const { row, col } = path[i];
         const tile = board[row]?.[col];
         if (!tile || tile.type === TILE_TYPE.MOUNTAIN) {
-            console.log(`Invalid move from player ${playerId}: Path through mountain or invalid tile.`);
             return;
         }
         if (i > 0) {
@@ -417,7 +488,6 @@ function processMove(playerId, path, activeTimelineId, game) {
             const dx = Math.abs(col - prev.col);
             const dy = Math.abs(row - prev.row);
             if (dx + dy !== 1) {
-                console.log(`Invalid move from player ${playerId}: Path is not contiguous or is diagonal.`);
                 return;
             }
         }
@@ -435,35 +505,8 @@ function findGeneral(playerId, currentGameState) { for (let row = 0; row < BOARD
 function handlePlayerDefeat(victorId, defeatedId, currentGameState) { for (let row = 0; row < BOARD_ROWS; row++) { for (let col = 0; col < BOARD_COLS; col++) { if (currentGameState.board[row][col].ownerId === defeatedId) currentGameState.board[row][col].ownerId = victorId; } } for (let i = currentGameState.moves.length - 1; i >= 0; i--) { if (currentGameState.moves[i].ownerId === defeatedId) { currentGameState.moves.splice(i, 1); } } }
 function findValidAdjacentTile(coords, currentGameState) { const { row, col } = coords; for (let r = row - 1; r <= row + 1; r++) { for (let c = col - 1; c <= col + 1; c++) { if (r === row && c === col) continue; if (r >= 0 && r < BOARD_ROWS && c >= 0 && c < BOARD_COLS) { const neighborTile = currentGameState.board[r][c]; if (neighborTile.type !== TILE_TYPE.MOUNTAIN) return { row: r, col: c }; } } } return null; }
 function calculateVisibility(playerId, game) { const visibilityGrid = Array(BOARD_ROWS).fill(null).map(() => Array(BOARD_COLS).fill(false)); const visibilityRadius = 2; for(const timelineId in game.multiverse){ const currentGameState = game.multiverse[timelineId].currentState; for (let row = 0; row < BOARD_ROWS; row++) { for (let col = 0; col < BOARD_COLS; col++) { if (currentGameState.board[row][col].ownerId === playerId) { for (let scanRow = row - visibilityRadius; scanRow <= row + visibilityRadius; scanRow++) { for (let scanCol = col - visibilityRadius; scanCol <= col + visibilityRadius; scanCol++) { if (scanRow >= 0 && scanRow < BOARD_ROWS && scanCol >= 0 && scanCol < BOARD_COLS) visibilityGrid[scanRow][scanCol] = true; } } } } } } return visibilityGrid; }
-function calculatePlayerStats(game) {
-    const stats = {};
-    for (const playerSocketId in game.players) {
-        const player = game.players[playerSocketId];
-        stats[player.id] = { army: 0 };
-    }
-
-    for (const timelineId in game.multiverse) {
-        const gameState = game.multiverse[timelineId].currentState;
-        for (let row = 0; row < BOARD_ROWS; row++) {
-            for (let col = 0; col < BOARD_COLS; col++) {
-                const tile = gameState.board[row][col];
-                if (tile.ownerId !== 0 && stats[tile.ownerId]) {
-                    stats[tile.ownerId].army += tile.army;
-                }
-            }
-        }
-        for (const move of gameState.moves) {
-            if (move.ownerId !== 0 && stats[move.ownerId]) {
-                stats[move.ownerId].army += move.army;
-            }
-        }
-    }
-    return stats;
-}
-
 
 io.on('connection', (socket) => {
-    console.log(`A user connected: ${socket.id}`);
     if (game.playerCount >= 8 || game.isGameRunning) {
         socket.emit('game-in-progress');
         socket.disconnect();
@@ -488,21 +531,26 @@ io.on('connection', (socket) => {
             const allReady = allPlayers.every(p => p.isReady);
 
             if (game.playerCount >= 2 && allReady) {
-                console.log("All players are ready. Starting game...");
                 initializeGame(game);
                 const dynamicGameLoop = () => {
                     if (!game.isGameRunning) return;
                     const activeTimelinesCount = Object.values(game.multiverse).filter(t => !t.isFrozen).length || 1;
-                    const tickDuration = GAME_TICK_MS / activeTimelinesCount;
+                    const tickDuration = GAME_TICK_MS * activeTimelinesCount;
                     gameLoop(game);
+
                     const playerStats = calculatePlayerStats(game);
+
                     for (const socketId in game.players) {
                         if (io.sockets.sockets.get(socketId)) {
                             const player = game.players[socketId];
                             const visibilityGrid = calculateVisibility(player.id, game);
                             const personalizedState = {
-                                multiverse: game.multiverse, portals: game.portals, paradoxEvents: game.paradoxEvents,
-                                visibilityGrid: visibilityGrid, boardDimensions: game.boardDimensions, playerStats: playerStats
+                                multiverse: game.multiverse,
+                                portals: game.portals,
+                                paradoxEvents: game.paradoxEvents,
+                                visibilityGrid: visibilityGrid,
+                                boardDimensions: game.boardDimensions,
+                                playerStats: playerStats
                             };
                             io.to(socketId).emit('game-state-update', personalizedState);
                         }
@@ -514,6 +562,40 @@ io.on('connection', (socket) => {
                 dynamicGameLoop();
             }
         }
+    });
+
+    socket.on('get-rollback-info', ({ activeTimelineId }) => {
+        const player = game.players[socket.id];
+        if (!player) return;
+        const timeline = game.multiverse[activeTimelineId];
+        if (!timeline) return;
+
+        let oldestAffordableStep = timeline.currentState.gameStep;
+        for (let step = timeline.currentState.gameStep -1; step >= timeline.anchorStep; step--) {
+             const lastKeyframe = [...timeline.keyframes].reverse().find(kf => kf.step <= step);
+             if (!lastKeyframe) break;
+
+             let tempState = JSON.parse(JSON.stringify(lastKeyframe.gameState));
+             const actionsToReplay = timeline.actions.filter(a => a.step > lastKeyframe.step && a.step <= step);
+
+             for (let s = lastKeyframe.step; s < step; s++) {
+                for (const actionRecord of actionsToReplay) {
+                    if (actionRecord.step === s) applyAction(tempState, actionRecord.action);
+                }
+                runSingleTickLogic(tempState, activeTimelineId, game);
+             }
+            
+             const generalInPast = findGeneral(player.id, tempState);
+             const stepsToRollback = timeline.currentState.gameStep - step;
+             const cost = Math.floor(10 * Math.pow(1.05, stepsToRollback / 10));
+
+             if (generalInPast && generalInPast.tile.army >= cost) {
+                oldestAffordableStep = step;
+             } else {
+                break;
+             }
+        }
+        socket.emit('rollback-info-response', { oldestAffordableStep });
     });
 
     socket.on('player-action', (action) => {
@@ -547,12 +629,11 @@ io.on('connection', (socket) => {
     });
 
     socket.on('disconnect', () => {
-        console.log(`User disconnected: ${socket.id}`);
         if (game.players[socket.id]) {
             const disconnectedPlayerId = game.players[socket.id].id;
             for (const timelineId in game.multiverse) {
                 const timeline = game.multiverse[timelineId];
-                handlePlayerDefeat(0, disconnectedPlayerId, timeline.currentState);
+                handlePlayerDefeat(0, disconnectedPlayerId, timeline.currentState); 
             }
             delete game.players[socket.id];
             game.playerCount--;
@@ -560,7 +641,6 @@ io.on('connection', (socket) => {
         io.emit('player-list-update', Object.values(game.players));
         if (game.isGameRunning && game.playerCount < 2) {
             clearTimeout(game.gameInterval);
-            console.log("Not enough players. Game stopped and state reset.");
             io.emit('game-over', { winnerId: 'none', reason: 'Not enough players.' });
             game = createNewGame();
         }
@@ -568,5 +648,5 @@ io.on('connection', (socket) => {
 });
 
 server.listen(PORT, () => {
-    console.log(`Server is running at http://localhost:${PORT}`);
+    console.log(`Server is running on port ${PORT}`);
 });
