@@ -269,7 +269,7 @@ function gameLoop(game) {
             timeline.overclockUntilStep = 0;
         }
         for (let i = 0; i < timeline.speedMultiplier; i++) {
-            updateTimeline(timeline, game);
+            updateTimeline(timeline);
         }
     }
 }
@@ -392,31 +392,30 @@ function processMove(playerId, path, activeTimelineId, game) {
     const timeline = game.multiverse[activeTimelineId];
     if (!timeline || !path || path.length < 2) return;
 
-    const board = timeline.currentState.board;
+    const gameState = timeline.currentState;
+    const board = gameState.board;
 
-    // --- NEW: Robust Path Validation ---
+    // --- NEW: Cancel existing move if one is in progress ---
+    const existingMoveIndex = gameState.moves.findIndex(move => move.ownerId === playerId);
+    if (existingMoveIndex !== -1) {
+        const oldMove = gameState.moves[existingMoveIndex];
+        const currentPos = oldMove.path[oldMove.pathIndex];
+        // Return the army to its last known position
+        board[currentPos.row][currentPos.col].army += oldMove.army;
+        gameState.moves.splice(existingMoveIndex, 1);
+    }
+
     for (let i = 0; i < path.length; i++) {
         const { row, col } = path[i];
-
-        // Check 1: Tile must exist
         const tile = board[row]?.[col];
-        if (!tile) {
-            console.log(`Invalid move from player ${playerId}: Path contains non-existent tile.`);
+        if (!tile || tile.type === TILE_TYPE.MOUNTAIN) {
+            console.log(`Invalid move from player ${playerId}: Path through mountain or invalid tile.`);
             return;
         }
-
-        // Check 2: Tile must not be a mountain
-        if (tile.type === TILE_TYPE.MOUNTAIN) {
-            console.log(`Invalid move from player ${playerId}: Path through mountain.`);
-            return;
-        }
-
-        // Check 3: Each step must be adjacent to the last
         if (i > 0) {
             const prev = path[i - 1];
             const dx = Math.abs(col - prev.col);
             const dy = Math.abs(row - prev.row);
-            // Allow only cardinal moves (not diagonal)
             if (dx + dy !== 1) {
                 console.log(`Invalid move from player ${playerId}: Path is not contiguous or is diagonal.`);
                 return;
@@ -428,12 +427,12 @@ function processMove(playerId, path, activeTimelineId, game) {
     if (startTile.ownerId !== playerId || startTile.army <= 1) return;
 
     const action = { type: 'MOVE', playerId, path };
-    timeline.actions.push({ step: timeline.currentState.gameStep, action });
-    applyAction(timeline.currentState, action);
+    timeline.actions.push({ step: gameState.gameStep, action });
+    applyAction(gameState, action);
 }
 
 function findGeneral(playerId, currentGameState) { for (let row = 0; row < BOARD_ROWS; row++) { for (let col = 0; col < BOARD_COLS; col++) { const tile = currentGameState.board[row][col]; if (tile.type === TILE_TYPE.GENERAL && tile.ownerId === playerId) return { row, col, tile }; } } return null; }
-function handlePlayerDefeat(victorId, defeatedId, currentGameState) { for (let row = 0; row < BOARD_ROWS; row++) { for (let col = 0; col < BOARD_COLS; col++) { if (currentGameState.board[row][col].ownerId === defeatedId) currentGameState.board[row][col].ownerId = victorId; } } for (const move of currentGameState.moves) { if (move.ownerId === defeatedId) move.ownerId = victorId; } }
+function handlePlayerDefeat(victorId, defeatedId, currentGameState) { for (let row = 0; row < BOARD_ROWS; row++) { for (let col = 0; col < BOARD_COLS; col++) { if (currentGameState.board[row][col].ownerId === defeatedId) currentGameState.board[row][col].ownerId = victorId; } } for (let i = currentGameState.moves.length - 1; i >= 0; i--) { if (currentGameState.moves[i].ownerId === defeatedId) { currentGameState.moves.splice(i, 1); } } }
 function findValidAdjacentTile(coords, currentGameState) { const { row, col } = coords; for (let r = row - 1; r <= row + 1; r++) { for (let c = col - 1; c <= col + 1; c++) { if (r === row && c === col) continue; if (r >= 0 && r < BOARD_ROWS && c >= 0 && c < BOARD_COLS) { const neighborTile = currentGameState.board[r][c]; if (neighborTile.type !== TILE_TYPE.MOUNTAIN) return { row: r, col: c }; } } } return null; }
 function calculateVisibility(playerId, game) { const visibilityGrid = Array(BOARD_ROWS).fill(null).map(() => Array(BOARD_COLS).fill(false)); const visibilityRadius = 2; for(const timelineId in game.multiverse){ const currentGameState = game.multiverse[timelineId].currentState; for (let row = 0; row < BOARD_ROWS; row++) { for (let col = 0; col < BOARD_COLS; col++) { if (currentGameState.board[row][col].ownerId === playerId) { for (let scanRow = row - visibilityRadius; scanRow <= row + visibilityRadius; scanRow++) { for (let scanCol = col - visibilityRadius; scanCol <= col + visibilityRadius; scanCol++) { if (scanRow >= 0 && scanRow < BOARD_ROWS && scanCol >= 0 && scanCol < BOARD_COLS) visibilityGrid[scanRow][scanCol] = true; } } } } } } return visibilityGrid; }
 
@@ -523,6 +522,12 @@ io.on('connection', (socket) => {
     socket.on('disconnect', () => {
         console.log(`User disconnected: ${socket.id}`);
         if (game.players[socket.id]) {
+            // --- FIX: When a player disconnects, their armies on the board should be handled ---
+            const disconnectedPlayerId = game.players[socket.id].id;
+            for (const timelineId in game.multiverse) {
+                const timeline = game.multiverse[timelineId];
+                handlePlayerDefeat(0, disconnectedPlayerId, timeline.currentState); // Turn tiles neutral
+            }
             delete game.players[socket.id];
             game.playerCount--;
         }
