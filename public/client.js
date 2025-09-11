@@ -36,8 +36,8 @@ window.onload = function() {
     });
 
     socket.on('game-state-update', (newState) => {
-        if (!localGameState.multiverse[activeTimelineId]) {
-            activeTimelineId = 'timeline-alpha';
+        if (!localGameState.multiverse[activeTimelineId] && Object.keys(newState.multiverse).length > 0) {
+            activeTimelineId = Object.keys(newState.multiverse)[0] || 'timeline-alpha';
         }
         localGameState = newState;
     });
@@ -134,7 +134,6 @@ window.onload = function() {
         
         for (const move of activeGameState.moves) {
             const currentPos = move.path[move.pathIndex];
-            // --- BUG FIX: Check if the moving army is in the fog of war ---
             if (isFogOfWarEnabled && localGameState.visibilityGrid && !localGameState.visibilityGrid[currentPos.row]?.[currentPos.col]) {
                 continue;
             }
@@ -283,6 +282,26 @@ window.onload = function() {
         }
     });
     
+    // --- NEW: Keyboard listeners for timeline switching ---
+    window.addEventListener('keydown', (event) => {
+        const timelineIds = Object.keys(localGameState.multiverse);
+        if (timelineIds.length <= 1) return;
+
+        const currentIndex = timelineIds.indexOf(activeTimelineId);
+
+        let newIndex = currentIndex;
+        if (event.key === 'e') {
+            newIndex = (currentIndex + 1) % timelineIds.length;
+        } else if (event.key === 'q') {
+            newIndex = (currentIndex - 1 + timelineIds.length) % timelineIds.length;
+        }
+
+        if (newIndex !== currentIndex) {
+            activeTimelineId = timelineIds[newIndex];
+            renderTimelineList(); // Update UI immediately
+        }
+    });
+
     document.getElementById('fogToggle').addEventListener('change', (event) => { isFogOfWarEnabled = event.target.checked; });
     document.getElementById('split-timeline-btn').addEventListener('click', () => { socket.emit('player-action', { type: 'SPLIT', activeTimelineId: activeTimelineId }); });
     document.getElementById('freeze-timeline-btn').addEventListener('click', () => { socket.emit('player-action', { type: 'FREEZE', activeTimelineId: activeTimelineId }); });
