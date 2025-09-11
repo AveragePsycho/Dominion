@@ -10,7 +10,7 @@ const PORT = process.env.PORT || 3000;
 app.use(express.static(path.join(__dirname, 'public')));
 
 let BOARD_COLS = 40, BOARD_ROWS = 30;
-const GAME_TICK_MS = 500, MOVE_TICKS = 2, KEYFRAME_INTERVAL = 60; // Added KEYFRAME_INTERVAL
+const GAME_TICK_MS = 500, MOVE_TICKS = 2, KEYFRAME_INTERVAL = 60;
 const TIME_ACTION_COST = { SPLIT: 50, FREEZE: 30, OVERCLOCK: 40, ROLLBACK: 60, ANCHOR: 25, HOP: 75 };
 const TIME_ACTION_DURATION = { FREEZE_TICKS: 20, OVERCLOCK_TICKS: 20, ROLLBACK_TICKS: 10, HOP_TICKS: 30 };
 const TILE_TYPE = { EMPTY: 0, MOUNTAIN: 1, CITY: 2, GENERAL: 3, FOREST: 4 };
@@ -27,7 +27,7 @@ function createNewGame() {
 function calculateMapDimensions(playerCount) {
     const baseArea = 40 * 30;
     const requiredArea = baseArea * (1 + (playerCount - 2) * 0.5);
-    const ratio = 16 / 9; // Match common screen aspect ratios
+    const ratio = 16 / 9;
     const newCols = Math.round(Math.sqrt(requiredArea * ratio));
     const newRows = Math.round(newCols / ratio);
     console.log(`New dimensions for ${playerCount} players: ${newCols}x${newRows}`);
@@ -105,7 +105,6 @@ function initializeGame(game) {
     io.emit('game-start');
 }
 
-// --- NEWLY IMPLEMENTED ---
 function runSingleTickLogic(currentGameState) {
     // 1. Update Army Movements
     for (let i = currentGameState.moves.length - 1; i >= 0; i--) {
@@ -114,35 +113,57 @@ function runSingleTickLogic(currentGameState) {
 
         if (move.progress >= MOVE_TICKS) {
             move.progress = 0;
-            move.pathIndex++;
 
-            const currentPos = move.path[move.pathIndex];
-            const currentTile = currentGameState.board[currentPos.row][currentPos.col];
+            const leavingPos = move.path[move.pathIndex];
+            const leavingTile = currentGameState.board[leavingPos.row][leavingPos.col];
 
-            // Snowballing: Absorb friendly armies
-            if (currentTile.ownerId === move.ownerId) {
-                move.army += currentTile.army -1;
-                currentTile.army = 1;
+            if (leavingTile.ownerId === move.ownerId) {
+                move.army += leavingTile.army - 1;
+                leavingTile.army = 1;
             }
 
-            if (move.pathIndex >= move.path.length - 1) {
-                // Reached destination, process combat/capture
-                const endTile = currentGameState.board[move.path[move.path.length-1].row][move.path[move.path.length-1].col];
-                
-                if (endTile.ownerId !== move.ownerId) { // Combat
-                    if (move.army > endTile.army) {
-                        endTile.army = move.army - endTile.army;
-                        if (endTile.type === TILE_TYPE.GENERAL) {
-                            handlePlayerDefeat(move.ownerId, endTile.ownerId, currentGameState);
-                        }
-                        endTile.ownerId = move.ownerId;
-                    } else {
-                        endTile.army -= move.army;
-                    }
-                } else { // Reinforcement
-                     endTile.army += move.army;
-                }
+            move.pathIndex++;
+            const arrivingPos = move.path[move.pathIndex];
+            if (!arrivingPos) { // Path is somehow invalid, remove the move
                 currentGameState.moves.splice(i, 1);
+                continue;
+            }
+            const arrivingTile = currentGameState.board[arrivingPos.row][arrivingPos.col];
+
+            const isFinalStep = move.pathIndex >= move.path.length - 1;
+
+            if (arrivingTile.ownerId !== move.ownerId) { 
+                if (move.army > arrivingTile.army) {
+                    move.army -= arrivingTile.army;
+                    if (arrivingTile.type === TILE_TYPE.GENERAL) {
+                        handlePlayerDefeat(move.ownerId, arrivingTile.ownerId, currentGameState);
+                    }
+                    arrivingTile.ownerId = move.ownerId;
+                    arrivingTile.army = move.army;
+
+                    if (!isFinalStep) {
+                        if (move.army > 1) {
+                            arrivingTile.army = 1;
+                            move.army -= 1;
+                        } else { 
+                            currentGameState.moves.splice(i, 1);
+                            continue;
+                        }
+                    } else { 
+                        currentGameState.moves.splice(i, 1);
+                        continue;
+                    }
+                } else { 
+                    arrivingTile.army -= move.army;
+                    currentGameState.moves.splice(i, 1);
+                    continue;
+                }
+            } else { 
+                if (isFinalStep) { 
+                    arrivingTile.army += move.army;
+                    currentGameState.moves.splice(i, 1);
+                    continue;
+                }
             }
         }
     }
@@ -163,7 +184,6 @@ function runSingleTickLogic(currentGameState) {
     }
 }
 
-
 function applyAction(gameState, action, game) {
     const { type, playerId } = action;
     const generalInfo = findGeneral(playerId, gameState);
@@ -171,7 +191,7 @@ function applyAction(gameState, action, game) {
     switch (type) {
         case 'MOVE':
             const startTile = gameState.board[action.path[0].row][action.path[0].col];
-            if (startTile.army <= 1) break; // Do not allow moves with 1 army
+            if (startTile.army <= 1) break;
             const movingArmy = startTile.army - 1;
             startTile.army = 1;
             const newMove = { ownerId: playerId, army: movingArmy, path: action.path, pathIndex: 0, progress: 0 };
@@ -258,16 +278,13 @@ function gameLoop(game) {
 function updateTimeline(timeline, game) {
     if (timeline.isFrozen) { timeline.currentState.gameStep++; return; }
 
-    // Run the deterministic logic for one tick
     runSingleTickLogic(timeline.currentState);
 
-    // Periodically save a keyframe
     if (timeline.currentState.gameStep % KEYFRAME_INTERVAL === 0) {
         timeline.keyframes.push({
             step: timeline.currentState.gameStep,
             gameState: JSON.parse(JSON.stringify(timeline.currentState))
         });
-        // Optional: Prune very old keyframes if memory is still a concern
         if (timeline.keyframes.length > 30) { 
             timeline.keyframes.shift();
         }
@@ -372,9 +389,21 @@ function anchorTimeline(playerId, activeTimelineId, game) {
     timeline.anchorStep = timeline.currentState.gameStep;
 }
 function openPortal(playerId, activeTimelineId, selectedTile, game) { const fromTimeline = game.multiverse[activeTimelineId]; if (!fromTimeline || !selectedTile) return; const fromGameState = fromTimeline.currentState; const portalTile = fromGameState.board[selectedTile.row][selectedTile.col]; if (portalTile.ownerId !== playerId) return; const generalInfo = findGeneral(playerId, fromGameState); if (!generalInfo || generalInfo.tile.army < TIME_ACTION_COST.HOP) return; const targetableTimelines = Object.keys(game.multiverse).filter(id => id !== activeTimelineId); if (targetableTimelines.length === 0) return; generalInfo.tile.army -= TIME_ACTION_COST.HOP; const toTimelineId = targetableTimelines[0]; const portalCoords = { row: selectedTile.row, col: selectedTile.col }; const expiresOnStep = fromGameState.gameStep + TIME_ACTION_DURATION.HOP_TICKS; game.portals.push({ fromTimelineId: activeTimelineId, toTimelineId: toTimelineId, coords: portalCoords, expiresOnStep: expiresOnStep }); game.portals.push({ fromTimelineId: toTimelineId, toTimelineId: activeTimelineId, coords: portalCoords, expiresOnStep: expiresOnStep }); }
+
+// --- MODIFIED: Added server-side path validation ---
 function processMove(playerId, path, activeTimelineId, game) {
     const timeline = game.multiverse[activeTimelineId];
     if (!timeline) return;
+
+    // Validate the path before creating the action
+    for (const tileCoords of path) {
+        const tile = timeline.currentState.board[tileCoords.row]?.[tileCoords.col];
+        if (!tile || tile.type === TILE_TYPE.MOUNTAIN) {
+            console.log(`Invalid move from player ${playerId}: Path through mountain or invalid tile.`);
+            return; // Reject the move
+        }
+    }
+
     const startTile = timeline.currentState.board[path[0].row][path[0].col];
     if (startTile.ownerId !== playerId || startTile.army <= 1) return;
 
@@ -382,6 +411,7 @@ function processMove(playerId, path, activeTimelineId, game) {
     timeline.actions.push({ step: timeline.currentState.gameStep, action });
     applyAction(timeline.currentState, action, game);
 }
+
 function findGeneral(playerId, currentGameState) { for (let row = 0; row < BOARD_ROWS; row++) { for (let col = 0; col < BOARD_COLS; col++) { const tile = currentGameState.board[row][col]; if (tile.type === TILE_TYPE.GENERAL && tile.ownerId === playerId) return { row, col, tile }; } } return null; }
 function handlePlayerDefeat(victorId, defeatedId, currentGameState) { for (let row = 0; row < BOARD_ROWS; row++) { for (let col = 0; col < BOARD_COLS; col++) { if (currentGameState.board[row][col].ownerId === defeatedId) currentGameState.board[row][col].ownerId = victorId; } } for (const move of currentGameState.moves) { if (move.ownerId === defeatedId) move.ownerId = victorId; } }
 function findValidAdjacentTile(coords, currentGameState) { const { row, col } = coords; for (let r = row - 1; r <= row + 1; r++) { for (let c = col - 1; c <= col + 1; c++) { if (r === row && c === col) continue; if (r >= 0 && r < BOARD_ROWS && c >= 0 && c < BOARD_COLS) { const neighborTile = currentGameState.board[r][c]; if (neighborTile.type !== TILE_TYPE.MOUNTAIN) return { row: r, col: c }; } } } return null; }

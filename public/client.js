@@ -16,9 +16,8 @@ window.onload = function() {
     let myPlayerId = null, myColor = '#FFFFFF', activeTimelineId = 'timeline-alpha';
     let inputState = { isDragging: false, startTile: null, path: [], endTile: null };
     let selectedTile = null, isFogOfWarEnabled = true;
-    let isReady = false; // Player's ready state
+    let isReady = false;
 
-    // --- NEW: Camera and Panning State ---
     const camera = { x: 0, y: 0, zoom: 1.0, minZoom: 0.3, maxZoom: 3.0 };
     let panningState = { isPanning: false, lastMouseX: 0, lastMouseY: 0 };
 
@@ -50,7 +49,6 @@ window.onload = function() {
             playerListElement.innerHTML = '<h3>Connected Players</h3>';
             players.forEach(player => {
                 const playerEl = document.createElement('div');
-                // --- NEW: Display Ready Status ---
                 const readyStatus = player.isReady ? '✔️ Ready' : '❌ Not Ready';
                 playerEl.textContent = `${player.name} - ${readyStatus}`;
                 playerEl.style.color = player.color; playerEl.style.fontWeight = 'bold';
@@ -61,30 +59,29 @@ window.onload = function() {
 
     socket.on('game-start', () => {
         document.getElementById('game-status').innerText = "";
-        readyBtn.style.display = 'none'; // Hide ready button
+        readyBtn.style.display = 'none';
     });
 
     socket.on('game-over', (data) => {
         const statusDiv = document.getElementById('game-status');
         if (data.winnerId === myPlayerId) { statusDiv.innerText = "You are victorious!"; }
         else { statusDiv.innerText = `Game Over! Player ${data.winnerId} is the winner.`; }
-        readyBtn.style.display = 'block'; // Show ready button for next game
+        readyBtn.style.display = 'block';
         isReady = false; readyBtn.classList.remove('ready'); readyBtn.textContent = 'Ready Up';
     });
 
     socket.on('game-in-progress', () => { document.body.innerHTML = '<h1>Game in progress. Please wait for the next round.</h1>'; });
 
-    // --- 3. RENDERING (OVERHAULED FOR CAMERA) ---
+    // --- 3. RENDERING ---
     function render() {
         ctx.save();
         ctx.clearRect(0, 0, canvas.width, canvas.height);
-        // Apply camera transformations
         ctx.translate(camera.x, camera.y);
         ctx.scale(camera.zoom, camera.zoom);
 
         const currentTimeline = localGameState.multiverse[activeTimelineId];
         if (!currentTimeline) {
-            ctx.restore(); // Restore context before drawing UI text
+            ctx.restore();
             ctx.fillStyle = 'white'; ctx.font = '24px sans-serif'; ctx.textAlign = 'center';
             ctx.fillText('Waiting for players to ready up...', canvas.width / 2, canvas.height / 2);
             renderTimelineList();
@@ -92,9 +89,8 @@ window.onload = function() {
         }
 
         const activeGameState = currentTimeline.currentState;
-        const TILE_SIZE = BASE_TILE_SIZE; // Use base size for world calculations
+        const TILE_SIZE = BASE_TILE_SIZE;
 
-        // --- NEW: View Culling ---
         const view = {
             x: -camera.x / camera.zoom, y: -camera.y / camera.zoom,
             width: canvas.width / camera.zoom, height: canvas.height / camera.zoom
@@ -137,6 +133,12 @@ window.onload = function() {
         }
         
         for (const move of activeGameState.moves) {
+            const currentPos = move.path[move.pathIndex];
+            // --- BUG FIX: Check if the moving army is in the fog of war ---
+            if (isFogOfWarEnabled && localGameState.visibilityGrid && !localGameState.visibilityGrid[currentPos.row]?.[currentPos.col]) {
+                continue;
+            }
+
             const segmentStart = move.path[move.pathIndex], segmentEnd = move.path[move.pathIndex + 1];
             if(!segmentStart || !segmentEnd) continue;
             const startX = (segmentStart.col * TILE_SIZE) + (TILE_SIZE / 2), startY = (segmentStart.row * TILE_SIZE) + (TILE_SIZE / 2);
@@ -166,7 +168,7 @@ window.onload = function() {
             ctx.strokeStyle = '#FFFF00'; ctx.lineWidth = 3 / camera.zoom; ctx.strokeRect(x, y, TILE_SIZE, TILE_SIZE);
         }
         
-        ctx.restore(); // Restore context to draw UI elements
+        ctx.restore();
         renderTimelineList();
     }
 
@@ -187,10 +189,9 @@ window.onload = function() {
         }
     }
     
-    // --- 4. INPUT EVENT LISTENERS (OVERHAULED FOR CAMERA/PANNING) ---
+    // --- 4. INPUT EVENT LISTENERS ---
     function getTileFromMouseEvent(event) {
         const rect = canvas.getBoundingClientRect();
-        // Convert screen coordinates to world coordinates
         const x = (event.clientX - rect.left - camera.x) / camera.zoom;
         const y = (event.clientY - rect.top - camera.y) / camera.zoom;
         const col = Math.floor(x / BASE_TILE_SIZE);
@@ -200,17 +201,16 @@ window.onload = function() {
     }
 
     canvas.addEventListener('mousedown', (event) => {
-        if (event.button === 0) { // Left mouse for unit movement
+        if (event.button === 0) {
             const tileCoords = getTileFromMouseEvent(event);
             if (tileCoords) { inputState.isDragging = true; inputState.startTile = tileCoords; inputState.path = [tileCoords]; inputState.endTile = tileCoords; }
-        } else if (event.button === 1) { // Middle mouse for panning
+        } else if (event.button === 1) {
             event.preventDefault();
             panningState.isPanning = true; panningState.lastMouseX = event.clientX; panningState.lastMouseY = event.clientY;
         }
     });
 
     canvas.addEventListener('mousemove', (event) => {
-        // --- BUG FIX: Restored unit path logic ---
         if (inputState.isDragging) {
             const currentTileCoords = getTileFromMouseEvent(event);
             if (currentTileCoords) {
@@ -236,7 +236,6 @@ window.onload = function() {
 
     canvas.addEventListener('mouseup', (event) => {
         if (event.button === 0) {
-            // --- BUG FIX: Restored unit move emit logic ---
             if (inputState.isDragging) {
                 if (inputState.path.length > 1) {
                     socket.emit('player-action', { type: 'MOVE', path: inputState.path, activeTimelineId: activeTimelineId });
@@ -299,7 +298,7 @@ window.onload = function() {
         socket.emit('player-action', {
             type: 'ROLLBACK',
             activeTimelineId: activeTimelineId,
-            targetStep: targetStep // Send the target step to the server
+            targetStep: targetStep
         });
     } else {
         alert("Invalid step number.");
