@@ -12,11 +12,13 @@ window.onload = function() {
     let localGameState = {
         multiverse: {}, portals: [], paradoxEvents: [], visibilityGrid: [],
         boardDimensions: { cols: 40, rows: 30 },
+        playerStats: {}
     };
     let myPlayerId = null, myColor = '#FFFFFF', activeTimelineId = 'timeline-alpha';
     let inputState = { isDragging: false, startTile: null, path: [], endTile: null };
     let selectedTile = null, isFogOfWarEnabled = true;
     let isReady = false;
+    let players = []; // Store the latest player list
 
     const camera = { x: 0, y: 0, zoom: 1.0, minZoom: 0.3, maxZoom: 3.0 };
     let panningState = { isPanning: false, lastMouseX: 0, lastMouseY: 0 };
@@ -40,21 +42,33 @@ window.onload = function() {
             activeTimelineId = Object.keys(newState.multiverse)[0] || 'timeline-alpha';
         }
         localGameState = newState;
+        updatePlayerListView();
     });
-
-    socket.on('player-list-update', (players) => {
+    
+    function updatePlayerListView() {
         const playerListElement = document.getElementById('player-list');
-        PLAYER_COLORS = { 0: '#333333' }; players.forEach(p => { PLAYER_COLORS[p.id] = p.color; });
         if (playerListElement) {
             playerListElement.innerHTML = '<h3>Connected Players</h3>';
             players.forEach(player => {
                 const playerEl = document.createElement('div');
                 const readyStatus = player.isReady ? '✔️ Ready' : '❌ Not Ready';
-                playerEl.textContent = `${player.name} - ${readyStatus}`;
-                playerEl.style.color = player.color; playerEl.style.fontWeight = 'bold';
+                
+                const timelineStats = localGameState.playerStats[activeTimelineId];
+                const armyCount = (timelineStats && timelineStats[player.id]) ? timelineStats[player.id].army : 0;
+                playerEl.textContent = `${player.name} (Army: ${armyCount}) - ${readyStatus}`;
+                
+                playerEl.style.color = player.color;
+                playerEl.style.fontWeight = 'bold';
                 playerListElement.appendChild(playerEl);
             });
         }
+    }
+    
+    socket.on('player-list-update', (playerList) => {
+        players = playerList;
+        PLAYER_COLORS = { 0: '#333333' }; 
+        players.forEach(p => { PLAYER_COLORS[p.id] = p.color; });
+        updatePlayerListView();
     });
 
     socket.on('game-start', () => {
@@ -282,7 +296,6 @@ window.onload = function() {
         }
     });
     
-    // --- NEW: Keyboard listeners for timeline switching ---
     window.addEventListener('keydown', (event) => {
         const timelineIds = Object.keys(localGameState.multiverse);
         if (timelineIds.length <= 1) return;
@@ -298,7 +311,7 @@ window.onload = function() {
 
         if (newIndex !== currentIndex) {
             activeTimelineId = timelineIds[newIndex];
-            renderTimelineList(); // Update UI immediately
+            renderTimelineList();
         }
     });
 
@@ -306,23 +319,40 @@ window.onload = function() {
     document.getElementById('split-timeline-btn').addEventListener('click', () => { socket.emit('player-action', { type: 'SPLIT', activeTimelineId: activeTimelineId }); });
     document.getElementById('freeze-timeline-btn').addEventListener('click', () => { socket.emit('player-action', { type: 'FREEZE', activeTimelineId: activeTimelineId }); });
     document.getElementById('overclock-timeline-btn').addEventListener('click', () => { socket.emit('player-action', { type: 'OVERCLOCK', activeTimelineId: activeTimelineId }); });
+    
     document.getElementById('rollback-timeline-btn').addEventListener('click', () => {
-    const currentStep = localGameState.multiverse[activeTimelineId]?.currentState.gameStep;
-    if (!currentStep) return;
+        const currentStep = localGameState.multiverse[activeTimelineId]?.currentState.gameStep;
+        if (!currentStep) return;
 
-    const targetStepInput = prompt(`Rollback to which step? (Current is ${currentStep})`, currentStep - 10);
-    const targetStep = parseInt(targetStepInput);
-
-    if (!isNaN(targetStep) && targetStep > 0 && targetStep < currentStep) {
-        socket.emit('player-action', {
-            type: 'ROLLBACK',
-            activeTimelineId: activeTimelineId,
-            targetStep: targetStep
-        });
-    } else {
-        alert("Invalid step number.");
-    }
+        // Ask the server for the oldest affordable step
+        socket.emit('get-rollback-info', { activeTimelineId });
     });
+
+    socket.on('rollback-info-response', ({ oldestAffordableStep }) => {
+        const currentStep = localGameState.multiverse[activeTimelineId]?.currentState.gameStep;
+        if (!currentStep) return;
+
+        const promptMessage = `Rollback to which step?\nCurrent step: ${currentStep}\nOldest affordable step: ${oldestAffordableStep}`;
+        const targetStepInput = prompt(promptMessage, oldestAffordableStep);
+        const targetStep = parseInt(targetStepInput);
+
+        if (isNaN(targetStep) || targetStep <= 0 || targetStep >= currentStep) {
+            alert("Invalid step number.");
+            return;
+        }
+
+        const stepsToRollback = currentStep - targetStep;
+        const cost = Math.floor(20 * Math.pow(1.10, stepsToRollback / 5));
+
+        if (confirm(`This will roll back ${stepsToRollback} steps to step ${targetStep}.\nEstimated cost: ${cost} army from your General in the past.\n\nAre you sure?`)) {
+            socket.emit('player-action', {
+                type: 'ROLLBACK',
+                activeTimelineId: activeTimelineId,
+                targetStep: targetStep
+            });
+        }
+    });
+
     document.getElementById('anchor-timeline-btn').addEventListener('click', () => { socket.emit('player-action', { type: 'ANCHOR', activeTimelineId: activeTimelineId }); });
     document.getElementById('hop-timeline-btn').addEventListener('click', () => { if (selectedTile) { socket.emit('player-action', { type: 'HOP', activeTimelineId: activeTimelineId, selectedTile: selectedTile }); } else { console.log("Client: Select a tile before opening a portal."); } });
     document.getElementById('timeline-list').addEventListener('click', (event) => { if (event.target && event.target.nodeName === "LI") { const newActiveId = event.target.dataset.timelineId; if (newActiveId && newActiveId !== activeTimelineId) { activeTimelineId = newActiveId; renderTimelineList(); } } });
@@ -332,5 +362,6 @@ window.onload = function() {
         render();
         requestAnimationFrame(animationLoop);
     }
+    
     requestAnimationFrame(animationLoop);
 };
