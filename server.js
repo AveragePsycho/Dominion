@@ -109,21 +109,24 @@ function runSingleTickLogic(currentGameState, timelineId, game) {
 
         if (move.progress >= MOVE_TICKS) {
             move.progress = 0;
-            const isFinalStep = move.pathIndex >= move.path.length - 1;
 
-            if (!isFinalStep) {
-                const leavingPos = move.path[move.pathIndex];
-                const leavingTile = currentGameState.board[leavingPos.row][leavingPos.col];
+            const leavingPos = move.path[move.pathIndex];
+            const isFinalSegment = move.pathIndex >= move.path.length - 2;
+            const arrivingPos = move.path[move.pathIndex + 1];
 
-                if (leavingTile.ownerId === move.ownerId) {
-                    move.army += leavingTile.army - 1;
-                    leavingTile.army = 1;
-                }
-                 move.pathIndex++;
+            if (!arrivingPos) { // Clean up malformed or finished moves
+                currentGameState.moves.splice(i, 1);
+                continue;
             }
-           
-            const arrivingPos = move.path[move.pathIndex];
+
+            const leavingTile = currentGameState.board[leavingPos.row][leavingPos.col];
             const arrivingTile = currentGameState.board[arrivingPos.row][arrivingPos.col];
+
+            // Snowball mechanic: absorb troops from the tile the army is leaving.
+            if (leavingTile.ownerId === move.ownerId) {
+                move.army += leavingTile.army - 1;
+                leavingTile.army = 1;
+            }
 
             const propagateTag = () => {
                 if (move.causalityTag) {
@@ -131,55 +134,68 @@ function runSingleTickLogic(currentGameState, timelineId, game) {
                 }
             };
 
-            if (arrivingTile.ownerId !== move.ownerId) { 
+            // --- Arrival Logic ---
+            if (arrivingTile.ownerId !== move.ownerId) { // Combat
                 if (move.army > arrivingTile.army) {
                     move.army -= arrivingTile.army;
                     if (arrivingTile.type === TILE_TYPE.GENERAL) {
                         handlePlayerDefeat(move.ownerId, arrivingTile.ownerId, currentGameState);
                     }
                     arrivingTile.ownerId = move.ownerId;
-                    arrivingTile.army = move.army;
-                    propagateTag();
-
-                    if (!isFinalStep) {
+                    
+                    if (isFinalSegment) {
+                        arrivingTile.army = move.army;
+                    } else {
+                        // If there's enough army to continue, leave 1 and move on
                         if (move.army > 1) {
                             arrivingTile.army = 1;
                             move.army -= 1;
-                        } else { 
+                        } else { // Otherwise, the move ends here
+                            arrivingTile.army = move.army;
                             currentGameState.moves.splice(i, 1);
-                            continue;
                         }
                     }
-                } else { 
+                    propagateTag();
+                } else { // Attacker loses
                     arrivingTile.army -= move.army;
                     currentGameState.moves.splice(i, 1);
-                    continue;
                 }
-            } else { 
-                if (isFinalStep) {
+            } else { // Reinforcing a friendly tile
+                if (isFinalSegment) {
                     arrivingTile.army += move.army;
+                    propagateTag();
+                } else {
+                    // "Pass over" logic: moving army absorbs the friendly tile's army and continues
+                    move.army += arrivingTile.army - 1;
+                    arrivingTile.army = 1;
                     propagateTag();
                 }
             }
-            
-            if (isFinalStep) {
+
+            // --- Post-Arrival Logic ---
+            if (isFinalSegment) {
+                // Portal check for moves that are finishing
                 const portal = game.portals.find(p => p.fromTimelineId === timelineId && p.coords.row === arrivingPos.row && p.coords.col === arrivingPos.col);
                 if (portal) {
                     const toTimeline = game.multiverse[portal.toTimelineId];
                     if (toTimeline) {
                         const exitTile = findValidAdjacentTile(portal.coords, toTimeline.currentState);
                         if (exitTile) {
-                            const newPath = [exitTile]; 
+                            const newPath = [exitTile];
                             const causalityTag = { originTimelineId: timelineId, originStep: currentGameState.gameStep };
-                            
                             const newMove = { ownerId: move.ownerId, army: move.army, path: newPath, pathIndex: 0, progress: 0, causalityTag };
                             toTimeline.currentState.moves.push(newMove);
                         } else {
-                            arrivingTile.army += move.army;
+                            arrivingTile.army += move.army; // Portal exit is blocked, refund army
                         }
                     }
                 }
-                currentGameState.moves.splice(i, 1);
+                currentGameState.moves.splice(i, 1); // The move is completed
+            } else {
+                // If the move was not spliced, it continues to the next segment
+                if (currentGameState.moves.includes(move)) {
+                    move.pathIndex++;
+                }
             }
         }
     }

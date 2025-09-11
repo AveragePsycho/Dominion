@@ -181,9 +181,8 @@ window.onload = function() {
             const segmentEnd = move.path[move.pathIndex + 1];
             if(!segmentStart || !segmentEnd) continue;
 
-            // --- LAG FIX: Interpolate position based on time since last server update ---
             const timeSinceUpdate = performance.now() - lastServerUpdate;
-            const progressInSegment = (GAME_TICK_MS * move.progress) + timeSinceUpdate;
+            const progressInSegment = (tickDurationMs * move.progress) + timeSinceUpdate;
             const totalFraction = Math.min(progressInSegment / segmentDuration, 1.0);
 
             const startX = (segmentStart.col * TILE_SIZE) + (TILE_SIZE / 2);
