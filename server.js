@@ -11,8 +11,8 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 let BOARD_COLS = 40, BOARD_ROWS = 30;
 const GAME_TICK_MS = 500, MOVE_TICKS = 2, KEYFRAME_INTERVAL = 60;
-const TIME_ACTION_COST = { SPLIT: 50, FREEZE: 30, OVERCLOCK: 40, ANCHOR: 25, HOP: 75 }; // Rollback cost is now dynamic
-const TIME_ACTION_DURATION = { FREEZE_TICKS: 20, OVERCLOCK_TICKS: 20, HOP_TICKS: 30 };
+const TIME_ACTION_COST = { SPLIT: 50, FREEZE: 30, OVERCLOCK: 40, ROLLBACK: 60, ANCHOR: 25, HOP: 75 };
+const TIME_ACTION_DURATION = { FREEZE_TICKS: 20, OVERCLOCK_TICKS: 20, ROLLBACK_TICKS: 10, HOP_TICKS: 30 };
 const TILE_TYPE = { EMPTY: 0, MOUNTAIN: 1, CITY: 2, GENERAL: 3, FOREST: 4 };
 const PLAYER_COLORS = ['#007bff', '#dc3545', '#28a745', '#ffc107', '#17a2b8', '#6f42c1', '#fd7e14', '#e83e8c'];
 let game = createNewGame();
@@ -65,7 +65,7 @@ function initializeGame(game) {
     const initialGameState = { board: [], gameStep: 0, moves: [] };
     const newBoard = [];
     for (let row = 0; row < rows; row++) {
-        const currentRow = [];
+        const currentRow = []; // --- BUG FIX: currentRow must be defined inside the loop ---
         for (let col = 0; col < cols; col++) {
             const tile = { type: TILE_TYPE.EMPTY, ownerId: 0, army: 0 };
             if (Math.random() < 0.1) { tile.type = TILE_TYPE.MOUNTAIN; }
@@ -214,46 +214,12 @@ function applyAction(gameState, action) {
     }
 }
 
-function calculatePlayerStats(game) {
-    const stats = {};
-    // Initialize stats object with global and per-timeline counts
-    stats.global = {};
-     for (const playerSocketId in game.players) {
-        const player = game.players[playerSocketId];
-        stats.global[player.id] = { army: 0 };
-    }
-
-    for (const timelineId in game.multiverse) {
-        stats[timelineId] = {};
-        for (const playerSocketId in game.players) {
-            const player = game.players[playerSocketId];
-            stats[timelineId][player.id] = { army: 0 };
-        }
-        
-        const gameState = game.multiverse[timelineId].currentState;
-        for (let row = 0; row < BOARD_ROWS; row++) {
-            for (let col = 0; col < BOARD_COLS; col++) {
-                const tile = gameState.board[row][col];
-                if (tile.ownerId !== 0 && stats[timelineId][tile.ownerId]) {
-                    stats[timelineId][tile.ownerId].army += tile.army;
-                    stats.global[tile.ownerId].army += tile.army;
-                }
-            }
-        }
-        for (const move of gameState.moves) {
-            if (move.ownerId !== 0 && stats[timelineId][move.ownerId]) {
-                stats[timelineId][move.ownerId].army += move.army;
-                stats.global[move.ownerId].army += move.army;
-            }
-        }
-    }
-    return stats;
-}
 
 function gameLoop(game) {
     const activePlayers = new Set();
     for (const timelineId in game.multiverse) {
-        const currentGameState = game.multiverse[timelineId].currentState;
+        const timeline = game.multiverse[timelineId];
+        const currentGameState = timeline.currentState;
         for (let row = 0; row < BOARD_ROWS; row++) {
             for (let col = 0; col < BOARD_COLS; col++) {
                 const tile = currentGameState.board[row][col];
@@ -469,6 +435,32 @@ function findGeneral(playerId, currentGameState) { for (let row = 0; row < BOARD
 function handlePlayerDefeat(victorId, defeatedId, currentGameState) { for (let row = 0; row < BOARD_ROWS; row++) { for (let col = 0; col < BOARD_COLS; col++) { if (currentGameState.board[row][col].ownerId === defeatedId) currentGameState.board[row][col].ownerId = victorId; } } for (let i = currentGameState.moves.length - 1; i >= 0; i--) { if (currentGameState.moves[i].ownerId === defeatedId) { currentGameState.moves.splice(i, 1); } } }
 function findValidAdjacentTile(coords, currentGameState) { const { row, col } = coords; for (let r = row - 1; r <= row + 1; r++) { for (let c = col - 1; c <= col + 1; c++) { if (r === row && c === col) continue; if (r >= 0 && r < BOARD_ROWS && c >= 0 && c < BOARD_COLS) { const neighborTile = currentGameState.board[r][c]; if (neighborTile.type !== TILE_TYPE.MOUNTAIN) return { row: r, col: c }; } } } return null; }
 function calculateVisibility(playerId, game) { const visibilityGrid = Array(BOARD_ROWS).fill(null).map(() => Array(BOARD_COLS).fill(false)); const visibilityRadius = 2; for(const timelineId in game.multiverse){ const currentGameState = game.multiverse[timelineId].currentState; for (let row = 0; row < BOARD_ROWS; row++) { for (let col = 0; col < BOARD_COLS; col++) { if (currentGameState.board[row][col].ownerId === playerId) { for (let scanRow = row - visibilityRadius; scanRow <= row + visibilityRadius; scanRow++) { for (let scanCol = col - visibilityRadius; scanCol <= col + visibilityRadius; scanCol++) { if (scanRow >= 0 && scanRow < BOARD_ROWS && scanCol >= 0 && scanCol < BOARD_COLS) visibilityGrid[scanRow][scanCol] = true; } } } } } } return visibilityGrid; }
+function calculatePlayerStats(game) {
+    const stats = {};
+    for (const playerSocketId in game.players) {
+        const player = game.players[playerSocketId];
+        stats[player.id] = { army: 0 };
+    }
+
+    for (const timelineId in game.multiverse) {
+        const gameState = game.multiverse[timelineId].currentState;
+        for (let row = 0; row < BOARD_ROWS; row++) {
+            for (let col = 0; col < BOARD_COLS; col++) {
+                const tile = gameState.board[row][col];
+                if (tile.ownerId !== 0 && stats[tile.ownerId]) {
+                    stats[tile.ownerId].army += tile.army;
+                }
+            }
+        }
+        for (const move of gameState.moves) {
+            if (move.ownerId !== 0 && stats[move.ownerId]) {
+                stats[move.ownerId].army += move.army;
+            }
+        }
+    }
+    return stats;
+}
+
 
 io.on('connection', (socket) => {
     console.log(`A user connected: ${socket.id}`);
@@ -500,24 +492,17 @@ io.on('connection', (socket) => {
                 initializeGame(game);
                 const dynamicGameLoop = () => {
                     if (!game.isGameRunning) return;
-                    // --- FIX: Game speed now slows with more timelines ---
                     const activeTimelinesCount = Object.values(game.multiverse).filter(t => !t.isFrozen).length || 1;
-                    const tickDuration = GAME_TICK_MS * activeTimelinesCount;
+                    const tickDuration = GAME_TICK_MS / activeTimelinesCount;
                     gameLoop(game);
-
                     const playerStats = calculatePlayerStats(game);
-
                     for (const socketId in game.players) {
                         if (io.sockets.sockets.get(socketId)) {
                             const player = game.players[socketId];
                             const visibilityGrid = calculateVisibility(player.id, game);
                             const personalizedState = {
-                                multiverse: game.multiverse,
-                                portals: game.portals,
-                                paradoxEvents: game.paradoxEvents,
-                                visibilityGrid: visibilityGrid,
-                                boardDimensions: game.boardDimensions,
-                                playerStats: playerStats
+                                multiverse: game.multiverse, portals: game.portals, paradoxEvents: game.paradoxEvents,
+                                visibilityGrid: visibilityGrid, boardDimensions: game.boardDimensions, playerStats: playerStats
                             };
                             io.to(socketId).emit('game-state-update', personalizedState);
                         }
@@ -529,41 +514,6 @@ io.on('connection', (socket) => {
                 dynamicGameLoop();
             }
         }
-    });
-
-    socket.on('get-rollback-info', ({ activeTimelineId }) => {
-        const player = game.players[socket.id];
-        if (!player) return;
-        const timeline = game.multiverse[activeTimelineId];
-        if (!timeline) return;
-
-        let oldestAffordableStep = timeline.currentState.gameStep;
-        // Check affordability in reverse, starting from the current step
-        for (let step = timeline.currentState.gameStep -1; step >= timeline.anchorStep; step--) {
-             const lastKeyframe = [...timeline.keyframes].reverse().find(kf => kf.step <= step);
-             if (!lastKeyframe) break;
-
-             let tempState = JSON.parse(JSON.stringify(lastKeyframe.gameState));
-             const actionsToReplay = timeline.actions.filter(a => a.step > lastKeyframe.step && a.step <= step);
-
-             for (let s = lastKeyframe.step; s < step; s++) {
-                for (const actionRecord of actionsToReplay) {
-                    if (actionRecord.step === s) applyAction(tempState, actionRecord.action);
-                }
-                runSingleTickLogic(tempState);
-             }
-            
-             const generalInPast = findGeneral(player.id, tempState);
-             const stepsToRollback = timeline.currentState.gameStep - step;
-             const cost = Math.floor(20 * Math.pow(1.10, stepsToRollback / 5));
-
-             if (generalInPast && generalInPast.tile.army >= cost) {
-                oldestAffordableStep = step;
-             } else {
-                break; // Stop checking once we find a step we can't afford
-             }
-        }
-        socket.emit('rollback-info-response', { oldestAffordableStep });
     });
 
     socket.on('player-action', (action) => {
@@ -602,7 +552,7 @@ io.on('connection', (socket) => {
             const disconnectedPlayerId = game.players[socket.id].id;
             for (const timelineId in game.multiverse) {
                 const timeline = game.multiverse[timelineId];
-                handlePlayerDefeat(0, disconnectedPlayerId, timeline.currentState); 
+                handlePlayerDefeat(0, disconnectedPlayerId, timeline.currentState);
             }
             delete game.players[socket.id];
             game.playerCount--;

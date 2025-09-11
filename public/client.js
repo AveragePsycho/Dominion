@@ -8,6 +8,8 @@ window.onload = function() {
     const BASE_TILE_SIZE = 20;
     let PLAYER_COLORS = { 0: '#333333' };
     const TILE_TYPE = { EMPTY: 0, MOUNTAIN: 1, CITY: 2, GENERAL: 3, FOREST: 4 };
+    const MOVE_TICKS = 2; // Must match server
+    const GAME_TICK_MS = 500; // Must match server
 
     let localGameState = {
         multiverse: {}, portals: [], paradoxEvents: [], visibilityGrid: [],
@@ -18,7 +20,12 @@ window.onload = function() {
     let inputState = { isDragging: false, startTile: null, path: [], endTile: null };
     let selectedTile = null, isFogOfWarEnabled = true;
     let isReady = false;
-    let players = []; // Store the latest player list
+    let players = [];
+    
+    // --- NEW: Client-side animation state ---
+    let clientMoves = {};
+    let lastRenderTime = performance.now();
+
 
     const camera = { x: 0, y: 0, zoom: 1.0, minZoom: 0.3, maxZoom: 3.0 };
     let panningState = { isPanning: false, lastMouseX: 0, lastMouseY: 0 };
@@ -86,6 +93,19 @@ window.onload = function() {
 
     socket.on('game-in-progress', () => { document.body.innerHTML = '<h1>Game in progress. Please wait for the next round.</h1>'; });
 
+    function getCausalityColor(tag, currentStep) {
+        if (!tag) return '#FFFFFF';
+        
+        const age = currentStep - tag.originStep;
+        const normalizedAge = Math.min(Math.max(age, 0), 100);
+        
+        const r = Math.floor(139 + (255 - 139) * (normalizedAge / 100));
+        const g = Math.floor(0 + (182 - 0) * (normalizedAge / 100));
+        const b = Math.floor(0 + (193 - 0) * (normalizedAge / 100));
+
+        return `rgb(${r},${g},${b})`;
+    }
+
     // --- 3. RENDERING ---
     function render() {
         ctx.save();
@@ -139,31 +159,59 @@ window.onload = function() {
                     const isMyTile = tile.ownerId === myPlayerId;
                     const isArmyVisible = (tile.type !== TILE_TYPE.FOREST) || isMyTile;
                     if (isArmyVisible) {
-                        ctx.fillStyle = '#FFFFFF'; ctx.font = `bold ${TILE_SIZE / 2}px sans-serif`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+                        ctx.fillStyle = getCausalityColor(tile.causalityTag, activeGameState.gameStep);
+                        ctx.font = `bold ${TILE_SIZE / 2}px sans-serif`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
                         ctx.fillText(tile.army, x + TILE_SIZE / 2, y + TILE_SIZE / 2);
                     }
                 }
             }
         }
         
+        // --- LAG FIX: Use client-side interpolation for smooth movement ---
+        const tickDurationMs = GAME_TICK_MS * (Object.keys(localGameState.multiverse).length || 1);
+        const segmentDuration = tickDurationMs * MOVE_TICKS;
+        
         for (const move of activeGameState.moves) {
-            const currentPos = move.path[move.pathIndex];
+             const currentPos = move.path[move.pathIndex];
             if (isFogOfWarEnabled && localGameState.visibilityGrid && !localGameState.visibilityGrid[currentPos.row]?.[currentPos.col]) {
                 continue;
             }
 
-            const segmentStart = move.path[move.pathIndex], segmentEnd = move.path[move.pathIndex + 1];
+            const segmentStart = move.path[move.pathIndex];
+            const segmentEnd = move.path[move.pathIndex + 1];
             if(!segmentStart || !segmentEnd) continue;
-            const startX = (segmentStart.col * TILE_SIZE) + (TILE_SIZE / 2), startY = (segmentStart.row * TILE_SIZE) + (TILE_SIZE / 2);
-            const endX = (segmentEnd.col * TILE_SIZE) + (TILE_SIZE / 2), endY = (segmentEnd.row * TILE_SIZE) + (TILE_SIZE / 2);
-            const fraction = Math.min(move.progress / 2, 1);
-            const currentX = startX + (endX - startX) * fraction, currentY = startY + (endY - startY) * fraction;
-            ctx.beginPath(); ctx.arc(currentX, currentY, TILE_SIZE / 2, 0, Math.PI * 2); ctx.fillStyle = PLAYER_COLORS[move.ownerId]; ctx.fill(); ctx.strokeStyle = '#FFFFFF'; ctx.lineWidth = 1 / camera.zoom; ctx.stroke();
+
+            // Calculate interpolation fraction based on real time
+            const serverProgressFraction = move.progress / MOVE_TICKS;
+            const timeSinceLastTick = Math.min(performance.now() - lastRenderTime, tickDurationMs);
+            const tickProgressFraction = timeSinceLastTick / tickDurationMs;
+            const totalFraction = Math.min((serverProgressFraction + tickProgressFraction) / MOVE_TICKS, 1.0);
+
+            const startX = (segmentStart.col * TILE_SIZE) + (TILE_SIZE / 2);
+            const startY = (segmentStart.row * TILE_SIZE) + (TILE_SIZE / 2);
+            const endX = (segmentEnd.col * TILE_SIZE) + (TILE_SIZE / 2);
+            const endY = (segmentEnd.row * TILE_SIZE) + (TILE_SIZE / 2);
+            
+            const currentX = startX + (endX - startX) * totalFraction;
+            const currentY = startY + (endY - startY) * totalFraction;
+            
+            ctx.beginPath();
+            ctx.arc(currentX, currentY, TILE_SIZE / 2, 0, Math.PI * 2);
+            ctx.fillStyle = PLAYER_COLORS[move.ownerId];
+            ctx.fill();
+            ctx.strokeStyle = '#FFFFFF';
+            ctx.lineWidth = 1 / camera.zoom;
+            ctx.stroke();
+
             if (camera.zoom > 0.5) {
-                ctx.fillStyle = '#FFFFFF'; ctx.font = `bold ${TILE_SIZE / 2}px sans-serif`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+                ctx.fillStyle = getCausalityColor(move.causalityTag, activeGameState.gameStep);
+                ctx.font = `bold ${TILE_SIZE / 2}px sans-serif`;
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
                 ctx.fillText(move.army, currentX, currentY);
             }
         }
+
 
         if (inputState.isDragging && inputState.path.length > 0) {
             ctx.strokeStyle = '#FFFFFF'; ctx.lineWidth = 2 / camera.zoom; ctx.beginPath();
@@ -312,6 +360,7 @@ window.onload = function() {
         if (newIndex !== currentIndex) {
             activeTimelineId = timelineIds[newIndex];
             renderTimelineList();
+            updatePlayerListView();
         }
     });
 
@@ -323,8 +372,6 @@ window.onload = function() {
     document.getElementById('rollback-timeline-btn').addEventListener('click', () => {
         const currentStep = localGameState.multiverse[activeTimelineId]?.currentState.gameStep;
         if (!currentStep) return;
-
-        // Ask the server for the oldest affordable step
         socket.emit('get-rollback-info', { activeTimelineId });
     });
 
@@ -342,7 +389,7 @@ window.onload = function() {
         }
 
         const stepsToRollback = currentStep - targetStep;
-        const cost = Math.floor(20 * Math.pow(1.10, stepsToRollback / 5));
+        const cost = Math.floor(10 * Math.pow(1.05, stepsToRollback / 10));
 
         if (confirm(`This will roll back ${stepsToRollback} steps to step ${targetStep}.\nEstimated cost: ${cost} army from your General in the past.\n\nAre you sure?`)) {
             socket.emit('player-action', {
@@ -355,10 +402,11 @@ window.onload = function() {
 
     document.getElementById('anchor-timeline-btn').addEventListener('click', () => { socket.emit('player-action', { type: 'ANCHOR', activeTimelineId: activeTimelineId }); });
     document.getElementById('hop-timeline-btn').addEventListener('click', () => { if (selectedTile) { socket.emit('player-action', { type: 'HOP', activeTimelineId: activeTimelineId, selectedTile: selectedTile }); } else { console.log("Client: Select a tile before opening a portal."); } });
-    document.getElementById('timeline-list').addEventListener('click', (event) => { if (event.target && event.target.nodeName === "LI") { const newActiveId = event.target.dataset.timelineId; if (newActiveId && newActiveId !== activeTimelineId) { activeTimelineId = newActiveId; renderTimelineList(); } } });
+    document.getElementById('timeline-list').addEventListener('click', (event) => { if (event.target && event.target.nodeName === "LI") { const newActiveId = event.target.dataset.timelineId; if (newActiveId && newActiveId !== activeTimelineId) { activeTimelineId = newActiveId; renderTimelineList(); updatePlayerListView(); } } });
 
     // --- 5. GAME LOOPS ---
     function animationLoop() {
+        lastRenderTime = performance.now();
         render();
         requestAnimationFrame(animationLoop);
     }
