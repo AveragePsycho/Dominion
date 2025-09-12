@@ -1,79 +1,168 @@
 body {
-    background-color: #1a1a1a;
-    color: #f0f0f0;
-    font-family: sans-serif;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background-color: #121212;
+    color: #EAEAEA;
+    margin: 0;
+    overflow: hidden;
     display: flex;
     flex-direction: column;
-    align-items: center;
-    margin: 0;
     height: 100vh;
-    overflow: hidden; /* Prevents scrollbars */
+}
+
+h1, h2, h3 {
+    color: #FFFFFF;
+    margin-top: 0;
+}
+
+button {
+    background-color: #444;
+    color: #EAEAEA;
+    border: 1px solid #666;
+    padding: 8px 12px;
+    cursor: pointer;
+    border-radius: 4px;
+    transition: background-color 0.2s, border-color 0.2s;
+}
+
+button:hover {
+    background-color: #555;
+    border-color: #888;
+}
+
+button.ready {
+    background-color: #28a745;
+    border-color: #1f8a38;
 }
 
 #top-bar {
-    width: 100%;
-    text-align: center;
-    padding: 5px 0;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 5px 20px;
+    background-color: #1a1a1a;
+    border-bottom: 1px solid #333;
 }
 
 #game-container {
     display: flex;
-    flex-direction: row;
-    justify-content: center;
-    align-items: flex-start;
-    gap: 20px;
-    width: 100%;
+    flex-grow: 1;
+    overflow: hidden;
 }
 
 #left-panel, #timeline-list-container {
-    padding: 10px;
-    background-color: #2a2a2a;
-    border-radius: 5px;
+    background-color: #1e1e1e;
+    padding: 15px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    overflow-y: auto;
+    min-width: 250px;
 }
 
-#timeline-controls button, #ready-btn {
+#timeline-controls button {
     display: block;
     width: 100%;
-    margin-bottom: 5px;
-    padding: 8px;
-    background-color: #007bff;
-    border: none;
-    color: white;
-    cursor: pointer;
+    margin-bottom: 10px;
+    text-align: left;
 }
-#timeline-controls button:hover, #ready-btn:hover {
-    background-color: #0056b3;
-}
-
-#ready-btn.ready {
-    background-color: #28a745; /* Green when ready */
-}
-#ready-btn.ready:hover {
-    background-color: #218838;
-}
-
 
 #canvas-container {
+    flex-grow: 1;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    background-color: #000;
     position: relative;
 }
 
-canvas {
-    border: 2px solid #555;
-    background-color: #000;
-    display: block; /* Removes extra space below canvas */
+#gameCanvas, #timeline-tree-canvas {
+    background-color: #2a2a2a;
+    border: 1px solid #444;
 }
 
 #game-status {
     position: absolute;
-    top: 50%;
+    top: 10px;
     left: 50%;
-    transform: translate(-50%, -50%);
-    font-size: 3em;
-    color: gold;
-    text-shadow: 2px 2px 4px #000;
-    pointer-events: none; /* Allows clicks to go through to the canvas */
+    transform: translateX(-50%);
+    background-color: rgba(0, 0, 0, 0.5);
+    color: white;
+    padding: 10px 20px;
+    border-radius: 5px;
+    font-size: 1.2em;
 }
 
-#player-list div {
-    padding: 2px 0;
+/* --- Custom Modal Styles --- */
+.hidden {
+    display: none !important;
+}
+
+#custom-modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0, 0, 0, 0.7);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 1000;
+}
+
+#custom-modal {
+    background-color: #282828;
+    border: 1px solid #555;
+    border-radius: 8px;
+    padding: 25px;
+    width: 90%;
+    max-width: 400px;
+    text-align: center;
+    box-shadow: 0 5px 15px rgba(0,0,0,0.5);
+}
+
+#modal-message {
+    margin: 15px 0;
+    line-height: 1.5;
+}
+
+#modal-input {
+    width: 100px;
+    padding: 8px;
+    margin: 10px auto;
+    display: block;
+    background-color: #333;
+    border: 1px solid #666;
+    color: #EAEAEA;
+    border-radius: 4px;
+    text-align: center;
+    font-size: 1em;
+}
+
+#modal-cost-display {
+    margin: 15px 0;
+    font-weight: bold;
+    color: #ffc107; /* A gold/yellow color for cost */
+}
+
+.modal-buttons {
+    display: flex;
+    justify-content: center;
+    gap: 15px;
+    margin-top: 20px;
+}
+
+.modal-buttons button {
+    padding: 10px 20px;
+    min-width: 100px;
+}
+
+#modal-confirm-btn {
+    background-color: #007bff;
+    border-color: #0056b3;
+}
+
+#modal-confirm-btn:hover {
+    background-color: #0069d9;
+    border-color: #005cbf;
 }

@@ -50,6 +50,62 @@ window.onload = function() {
 
     const readyBtn = document.getElementById('ready-btn');
 
+    // --- Custom Modal Elements and Logic ---
+    const modalOverlay = document.getElementById('custom-modal-overlay');
+    const modalTitle = document.getElementById('modal-title');
+    const modalMessage = document.getElementById('modal-message');
+    const modalInput = document.getElementById('modal-input');
+    const modalCostDisplay = document.getElementById('modal-cost-display');
+    const modalConfirmBtn = document.getElementById('modal-confirm-btn');
+    const modalCancelBtn = document.getElementById('modal-cancel-btn');
+
+    function showModal(config) {
+        modalTitle.textContent = config.title;
+        modalMessage.textContent = config.message;
+
+        modalInput.classList.toggle('hidden', !config.showInput);
+        if (config.showInput) {
+            modalInput.value = config.defaultValue || '';
+        }
+        
+        modalCostDisplay.textContent = config.costText || '';
+        modalCostDisplay.classList.toggle('hidden', !config.costText);
+
+        modalConfirmBtn.textContent = config.confirmText || 'Confirm';
+        modalCancelBtn.textContent = config.cancelText || 'Cancel';
+        
+        modalOverlay.classList.remove('hidden');
+
+        return new Promise((resolve, reject) => {
+            const onConfirm = () => {
+                cleanup();
+                resolve(config.showInput ? modalInput.value : true);
+            };
+
+            const onCancel = () => {
+                cleanup();
+                reject();
+            };
+            
+            const onKeyup = (e) => {
+                if(e.key === 'Enter') onConfirm();
+                if(e.key === 'Escape') onCancel();
+            }
+
+            function cleanup() {
+                modalConfirmBtn.removeEventListener('click', onConfirm);
+                modalCancelBtn.removeEventListener('click', onCancel);
+                window.removeEventListener('keyup', onKeyup);
+                modalOverlay.classList.add('hidden');
+            }
+
+            modalConfirmBtn.addEventListener('click', onConfirm);
+            modalCancelBtn.addEventListener('click', onCancel);
+            window.addEventListener('keyup', onKeyup);
+        });
+    }
+
+
     // --- 2. SOCKET.IO EVENT HANDLERS ---
     socket.on('player-assignment', (data) => {
         myPlayerId = data.playerId; myColor = data.color;
@@ -435,6 +491,9 @@ window.onload = function() {
     });
     
     window.addEventListener('keydown', (event) => {
+        // Don't process game keybinds if modal is open
+        if (!modalOverlay.classList.contains('hidden')) return;
+
         const timelineIds = Object.keys(localGameState.multiverse);
 
         // Timeline switching
@@ -514,64 +573,79 @@ window.onload = function() {
         const currentStep = localGameState.multiverse[activeTimelineId]?.currentState.gameStep;
         if (!currentStep) return;
 
-        const promptMessage = `Rollback to which step?\nCurrent step: ${currentStep}\nOldest affordable step: ${oldestAffordableStep}`;
-        const targetStepInput = prompt(promptMessage, oldestAffordableStep);
-        const targetStep = parseInt(targetStepInput);
+        showModal({
+            title: 'Timeline Rollback',
+            message: `Select a step to roll back to. Current step: ${currentStep}. Oldest affordable step: ${oldestAffordableStep}.`,
+            showInput: true,
+            defaultValue: oldestAffordableStep
+        }).then(targetStepInput => {
+            const targetStep = parseInt(targetStepInput);
+            if (!Number.isInteger(targetStep) || targetStep < oldestAffordableStep || targetStep >= currentStep) {
+                showModal({ title: 'Error', message: 'Invalid or unaffordable step number.' });
+                return;
+            }
 
-        if (!Number.isInteger(targetStep) || targetStep < oldestAffordableStep || targetStep >= currentStep) {
-            alert("Invalid or unaffordable step number.");
-            return;
-        }
+            const stepsToRollback = currentStep - targetStep;
+            const cost = Math.floor(10 * Math.pow(1.05, stepsToRollback / 10));
 
-        const stepsToRollback = currentStep - targetStep;
-        const cost = Math.floor(10 * Math.pow(1.05, stepsToRollback / 10));
-
-        if (confirm(`This will roll back ${stepsToRollback} steps to step ${targetStep}.\nEstimated cost: ${cost} army from your General in the past.\n\nAre you sure?`)) {
-            socket.emit('player-action', {
-                type: 'ROLLBACK',
-                activeTimelineId: activeTimelineId,
-                targetStep: targetStep
+            return showModal({
+                title: 'Confirm Rollback',
+                message: `This will roll back ${stepsToRollback} steps to step ${targetStep}.`,
+                costText: `Estimated Cost: ${cost} army`,
+            }).then(() => {
+                 socket.emit('player-action', {
+                    type: 'ROLLBACK',
+                    activeTimelineId: activeTimelineId,
+                    targetStep: targetStep
+                });
             });
-        }
+        }).catch(() => {}); // Do nothing on cancel
     });
 
     socket.on('affordability-info-response', ({ actionType, maxDuration }) => {
         if (maxDuration <= 0) {
-            alert("You cannot afford to perform this action.");
+            showModal({ title: 'Unaffordable', message: 'You do not have enough army on your General to perform this action.'});
             return;
         }
         
-        const promptMessage = `Enter duration for ${actionType} (in steps).\nMax affordable duration: ${maxDuration} steps.`;
-        const durationInput = prompt(promptMessage, maxDuration);
-        const duration = parseInt(durationInput);
-
-        if (!Number.isInteger(duration) || duration <= 0 || duration > maxDuration) {
-            alert("Invalid or unaffordable duration.");
-            return;
-        }
-        
-        const costCalculator = COST_CALCULATORS[actionType];
-        if(!costCalculator) return;
-        
-        const cost = costCalculator(duration);
-
-        if (confirm(`This action will last for ${duration} steps and cost ${cost} army from your General.\n\nAre you sure?`)) {
-            const action = {
-                type: actionType,
-                activeTimelineId: activeTimelineId,
-                duration: duration,
-                cost: cost,
-            };
-            if(actionType === 'HOP') {
-                if(selectedTile) {
-                    action.selectedTile = selectedTile;
-                } else {
-                    alert("You must select a tile to open a portal.");
-                    return;
-                }
+        showModal({
+            title: `Set ${actionType} Duration`,
+            message: `Enter duration for ${actionType} (in steps). Maximum affordable is ${maxDuration} steps.`,
+            showInput: true,
+            defaultValue: maxDuration
+        }).then(durationInput => {
+            const duration = parseInt(durationInput);
+            if (!Number.isInteger(duration) || duration <= 0 || duration > maxDuration) {
+                showModal({ title: 'Error', message: 'Invalid or unaffordable duration.'});
+                return;
             }
-            socket.emit('player-action', action);
-        }
+
+            const costCalculator = COST_CALCULATORS[actionType];
+            if(!costCalculator) return;
+            const cost = costCalculator(duration);
+
+            return showModal({
+                title: `Confirm ${actionType}`,
+                message: `This action will last for ${duration} steps.`,
+                costText: `Cost: ${cost} army`,
+            }).then(() => {
+                const action = {
+                    type: actionType,
+                    activeTimelineId: activeTimelineId,
+                    duration: duration,
+                    cost: cost,
+                };
+                if(actionType === 'HOP') {
+                    if(selectedTile) {
+                        action.selectedTile = selectedTile;
+                    } else {
+                        showModal({ title: 'Error', message: 'You must select a tile to open a portal.'});
+                        return;
+                    }
+                }
+                socket.emit('player-action', action);
+            });
+        }).catch(() => {}); // Do nothing on cancel
     });
 
     document.getElementById('anchor-timeline-btn').addEventListener('click', () => { socket.emit('player-action', { type: 'ANCHOR', activeTimelineId: activeTimelineId }); });
@@ -585,7 +659,7 @@ window.onload = function() {
     });
     document.getElementById('hop-timeline-btn').addEventListener('click', () => {
         if (!selectedTile) {
-            alert("You must select a tile before opening a portal.");
+            showModal({ title: 'Error', message: 'You must select a tile before opening a portal.'});
             return;
         }
         socket.emit('get-affordability-info', { actionType: 'HOP', activeTimelineId: activeTimelineId });

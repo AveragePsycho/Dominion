@@ -21,11 +21,11 @@
             <div id="timeline-controls">
                 <h3>Timeline Controls</h3>
                 <button id="split-timeline-btn">Split Timeline (Cost: 50)</button>
-                <button id="freeze-timeline-btn">Freeze Timeline (Cost: 30)</button>
-                <button id="overclock-timeline-btn">Overclock Timeline (Cost: 40)</button>
+                <button id="freeze-timeline-btn">Freeze Timeline</button>
+                <button id="overclock-timeline-btn">Overclock Timeline</button>
                 <button id="rollback-timeline-btn">Rollback Timeline</button>
                 <button id="anchor-timeline-btn">Anchor Timeline (Cost: 25)</button>
-                <button id="hop-timeline-btn">Open Portal (Cost: 75)</button>
+                <button id="hop-timeline-btn">Open Portal</button>
             </div>
              <label>
                 <input type="checkbox" id="fogToggle" checked>
@@ -41,6 +41,19 @@
         <div id="timeline-list-container">
             <h2>Active Timelines</h2>
             <canvas id="timeline-tree-canvas" width="300" height="600"></canvas>
+        </div>
+    </div>
+
+    <div id="custom-modal-overlay" class="hidden">
+        <div id="custom-modal">
+            <h3 id="modal-title">Modal Title</h3>
+            <p id="modal-message">This is the modal message.</p>
+            <input type="number" id="modal-input" class="hidden">
+            <div id="modal-cost-display"></div>
+            <div class="modal-buttons">
+                <button id="modal-cancel-btn">Cancel</button>
+                <button id="modal-confirm-btn">Confirm</button>
+            </div>
         </div>
     </div>
 
