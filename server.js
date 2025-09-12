@@ -13,7 +13,7 @@ let BOARD_COLS = 40, BOARD_ROWS = 30;
 const GAME_TICK_MS = 500, MOVE_TICKS = 2, KEYFRAME_INTERVAL = 60;
 const TIME_ACTION_COST = { SPLIT: 50, FREEZE: 30, OVERCLOCK: 40, ANCHOR: 25, HOP: 75 };
 const TIME_ACTION_DURATION = { FREEZE_TICKS: 20, OVERCLOCK_TICKS: 20, HOP_TICKS: 30 };
-const TILE_TYPE = { EMPTY: 0, MOUNTAIN: 1, CITY: 2, GENERAL: 3, FOREST: 4 };
+const TILE_TYPE = { EMPTY: 0, MOUNTAIN: 1, CITY: 2, GENERAL: 3, FOREST: 4, ERASED: 5 };
 const PLAYER_COLORS = ['#007bff', '#dc3545', '#28a745', '#ffc107', '#17a2b8', '#6f42c1', '#fd7e14', '#e83e8c'];
 let game = createNewGame();
 
@@ -97,6 +97,7 @@ function initializeGame(game) {
         actions: [],
         isFrozen: false, freezeUntilStep: 0, overclockUntilStep: 0,
         speedMultiplier: 1.0, anchorStep: 0, parentId: null, splitStep: 0,
+        isUnravelling: false, unravelCenter: null, unravelRadius: 0
     };
     game.isGameRunning = true;
     io.emit('game-start');
@@ -287,7 +288,9 @@ function calculatePlayerStats(game) {
 function gameLoop(game) {
     const activePlayers = new Set();
     for (const timelineId in game.multiverse) {
-        const currentGameState = game.multiverse[timelineId].currentState;
+        const timeline = game.multiverse[timelineId];
+        if (timeline.isUnravelling) continue; // Skip defeated players in unravelling timelines
+        const currentGameState = timeline.currentState;
         for (let row = 0; row < BOARD_ROWS; row++) {
             for (let col = 0; col < BOARD_COLS; col++) {
                 const tile = currentGameState.board[row][col];
@@ -324,8 +327,13 @@ function gameLoop(game) {
     game.portals = game.portals.filter(p => p.expiresOnStep > masterClock);
     paradoxHandler(game);
     game.paradoxEvents = game.paradoxEvents.filter(event => { event.duration--; return event.duration > 0; });
-    for (const timelineId in game.multiverse) {
+    
+    // Copy keys to prevent issues with deleting timelines during iteration
+    const timelineIds = Object.keys(game.multiverse);
+    for (const timelineId of timelineIds) {
         const timeline = game.multiverse[timelineId];
+        if (!timeline) continue; // May have been deleted by paradoxHandler
+
         if (timeline.isFrozen && timeline.currentState.gameStep >= timeline.freezeUntilStep) {
             timeline.isFrozen = false;
             timeline.freezeUntilStep = 0;
@@ -341,7 +349,10 @@ function gameLoop(game) {
 }
 
 function updateTimeline(timeline, timelineId, game) {
-    if (timeline.isFrozen) { timeline.currentState.gameStep++; return; }
+    if (timeline.isFrozen || timeline.isUnravelling) { 
+        if (!timeline.isUnravelling) timeline.currentState.gameStep++;
+        return; 
+    }
     runSingleTickLogic(timeline.currentState, timelineId, game);
 
     if (timeline.currentState.gameStep % KEYFRAME_INTERVAL === 0) {
@@ -355,7 +366,65 @@ function updateTimeline(timeline, timelineId, game) {
     }
 }
 
-function paradoxHandler(game) { for (const timelineId in game.multiverse) { const timeline = game.multiverse[timelineId]; const currentGameState = timeline.currentState; for (let row = 0; row < BOARD_ROWS; row++) { for (let col = 0; col < BOARD_COLS; col++) { const tile = currentGameState.board[row][col]; if (tile.causalityTag) { const origin = game.multiverse[tile.causalityTag.originTimelineId]; if (!origin || origin.currentState.gameStep < tile.causalityTag.originStep) { tile.army = 0; delete tile.causalityTag; game.paradoxEvents.push({ timelineId, coords: { row, col }, duration: 10 }); } } } } for (let i = currentGameState.moves.length - 1; i >= 0; i--) { const move = currentGameState.moves[i]; if (move.causalityTag) { const origin = game.multiverse[move.causalityTag.originTimelineId]; if (!origin || origin.currentState.gameStep < move.causalityTag.originStep) { const coords = move.path[move.pathIndex]; game.paradoxEvents.push({ timelineId, coords, duration: 10 }); currentGameState.moves.splice(i, 1); } } } } }
+function paradoxHandler(game) { 
+    // Handle unravelling timelines
+    for (const timelineId in game.multiverse) {
+        const timeline = game.multiverse[timelineId];
+        if (timeline.isUnravelling) {
+            timeline.unravelRadius += 1; // Unravels 1 tile per tick
+            const { unravelCenter, unravelRadius } = timeline;
+            let tilesRemaining = false;
+
+            for (let row = 0; row < BOARD_ROWS; row++) {
+                for (let col = 0; col < BOARD_COLS; col++) {
+                    const tile = timeline.currentState.board[row][col];
+                    if (tile.type !== TILE_TYPE.ERASED) {
+                        const dist = Math.sqrt(Math.pow(row - unravelCenter.row, 2) + Math.pow(col - unravelCenter.col, 2));
+                        if (dist <= unravelRadius) {
+                            tile.type = TILE_TYPE.ERASED;
+                            tile.army = 0;
+                            tile.ownerId = 0;
+                        } else {
+                            tilesRemaining = true;
+                        }
+                    }
+                }
+            }
+            if (!tilesRemaining) {
+                delete game.multiverse[timelineId];
+            }
+        }
+    }
+
+    for (const timelineId in game.multiverse) {
+        const timeline = game.multiverse[timelineId];
+        const currentGameState = timeline.currentState;
+        for (let row = 0; row < BOARD_ROWS; row++) {
+            for (let col = 0; col < BOARD_COLS; col++) {
+                const tile = currentGameState.board[row][col];
+                if (tile.causalityTag) {
+                    const origin = game.multiverse[tile.causalityTag.originTimelineId];
+                    if (!origin || origin.currentState.gameStep < tile.causalityTag.originStep || origin.isUnravelling) {
+                        tile.army = 0;
+                        delete tile.causalityTag;
+                        game.paradoxEvents.push({ timelineId, coords: { row, col }, duration: 10 });
+                    }
+                }
+            }
+        }
+        for (let i = currentGameState.moves.length - 1; i >= 0; i--) {
+            const move = currentGameState.moves[i];
+            if (move.causalityTag) {
+                const origin = game.multiverse[move.causalityTag.originTimelineId];
+                if (!origin || origin.currentState.gameStep < move.causalityTag.originStep || origin.isUnravelling) {
+                    const coords = move.path[move.pathIndex];
+                    game.paradoxEvents.push({ timelineId, coords, duration: 10 });
+                    currentGameState.moves.splice(i, 1);
+                }
+            }
+        }
+    }
+}
 
 function splitTimeline(playerId, activeTimelineId, game) {
     const timeline = game.multiverse[activeTimelineId];
@@ -376,6 +445,7 @@ function splitTimeline(playerId, activeTimelineId, game) {
         actions: timeline.actions.filter(a => a.step <= newGameState.gameStep), 
         isFrozen: false, freezeUntilStep: 0, overclockUntilStep: 0,
         speedMultiplier: 1.0, anchorStep: newGameState.gameStep, parentId: activeTimelineId, splitStep: timeline.currentState.gameStep,
+        isUnravelling: false, unravelCenter: null, unravelRadius: 0
     };
 }
 
@@ -441,6 +511,44 @@ function rollbackTimeline(playerId, activeTimelineId, targetStep, game) {
     timeline.currentState = preSimState;
     timeline.actions = timeline.actions.filter(a => a.step <= targetStep);
     timeline.keyframes = timeline.keyframes.filter(kf => kf.step <= targetStep);
+
+    // --- Timeline Unravelling Check with Propagation ---
+    const unravelQueue = [];
+    
+    // 1. Find direct children whose creation has been undone.
+    for (const otherTimelineId in game.multiverse) {
+        const otherTimeline = game.multiverse[otherTimelineId];
+        if (otherTimeline.parentId === activeTimelineId && otherTimeline.splitStep > timeline.currentState.gameStep) {
+            if (!unravelQueue.includes(otherTimeline.id)) {
+                unravelQueue.push(otherTimeline.id);
+            }
+        }
+    }
+
+    // 2. Breadth-first traversal to find all descendants of the unravelling timelines.
+    let i = 0;
+    while (i < unravelQueue.length) {
+        const parentIdToUnravel = unravelQueue[i];
+        i++; 
+
+        for (const childId in game.multiverse) {
+            const childTimeline = game.multiverse[childId];
+            if (childTimeline.parentId === parentIdToUnravel) {
+                if (!unravelQueue.includes(childTimeline.id)) {
+                    unravelQueue.push(childTimeline.id);
+                }
+            }
+        }
+    }
+    
+    // 3. Mark all timelines in the queue as unravelling.
+    for (const timelineIdToUnravel of unravelQueue) {
+        const timelineToUnravel = game.multiverse[timelineIdToUnravel];
+        if (timelineToUnravel) {
+            timelineToUnravel.isUnravelling = true;
+            timelineToUnravel.unravelCenter = { row: Math.floor(BOARD_ROWS / 2), col: Math.floor(BOARD_COLS / 2) };
+        }
+    }
 }
 
 function anchorTimeline(playerId, activeTimelineId, game) {

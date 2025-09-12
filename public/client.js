@@ -7,7 +7,7 @@ window.onload = function() {
     // --- 1. LOCAL STATE & CONSTANTS ---
     const BASE_TILE_SIZE = 20;
     let PLAYER_COLORS = { 0: '#333333' };
-    const TILE_TYPE = { EMPTY: 0, MOUNTAIN: 1, CITY: 2, GENERAL: 3, FOREST: 4 };
+    const TILE_TYPE = { EMPTY: 0, MOUNTAIN: 1, CITY: 2, GENERAL: 3, FOREST: 4, ERASED: 5 };
     const MOVE_TICKS = 2; // Must match server
     const GAME_TICK_MS = 500; // Must match server
 
@@ -33,6 +33,10 @@ window.onload = function() {
     const ctx = canvas.getContext('2d');
     canvas.width = 1280;
     canvas.height = 720;
+    
+    const treeCanvas = document.getElementById('timeline-tree-canvas');
+    const treeCtx = treeCanvas.getContext('2d');
+
 
     const readyBtn = document.getElementById('ready-btn');
 
@@ -46,6 +50,11 @@ window.onload = function() {
     socket.on('game-state-update', (newState) => {
         if (!localGameState.multiverse[activeTimelineId] && Object.keys(newState.multiverse).length > 0) {
             activeTimelineId = Object.keys(newState.multiverse)[0] || 'timeline-alpha';
+        }
+        // If the active timeline was just deleted, switch to its parent or alpha
+        if (newState.multiverse && !newState.multiverse[activeTimelineId]) {
+            const oldTimeline = localGameState.multiverse[activeTimelineId];
+            activeTimelineId = (oldTimeline && newState.multiverse[oldTimeline.parentId]) ? oldTimeline.parentId : 'timeline-alpha';
         }
         localGameState = newState;
         lastServerUpdate = performance.now(); // Reset timer on each update
@@ -118,7 +127,7 @@ window.onload = function() {
             ctx.restore();
             ctx.fillStyle = 'white'; ctx.font = '24px sans-serif'; ctx.textAlign = 'center';
             ctx.fillText('Waiting for players to ready up...', canvas.width / 2, canvas.height / 2);
-            renderTimelineList();
+            renderTimelineTree();
             return;
         }
 
@@ -144,6 +153,12 @@ window.onload = function() {
                 }
                 const tile = activeGameState.board[row]?.[col];
                 if (!tile) continue;
+                
+                if(tile.type === TILE_TYPE.ERASED) {
+                    ctx.fillStyle = '#000000';
+                    ctx.fillRect(x, y, TILE_SIZE, TILE_SIZE);
+                    continue;
+                }
 
                 ctx.fillStyle = PLAYER_COLORS[tile.ownerId] || '#FFFFFF';
                 if (tile.type === TILE_TYPE.MOUNTAIN) { ctx.fillStyle = '#555555'; }
@@ -165,6 +180,15 @@ window.onload = function() {
                     }
                 }
             }
+        }
+        
+        if (currentTimeline.isUnravelling && currentTimeline.unravelCenter) {
+            ctx.fillStyle = 'rgba(255, 0, 255, 0.2)';
+            ctx.beginPath();
+            const centerX = currentTimeline.unravelCenter.col * TILE_SIZE + TILE_SIZE / 2;
+            const centerY = currentTimeline.unravelCenter.row * TILE_SIZE + TILE_SIZE / 2;
+            ctx.arc(centerX, centerY, currentTimeline.unravelRadius * TILE_SIZE, 0, Math.PI * 2);
+            ctx.fill();
         }
         
         const activeTimelinesCount = Object.keys(localGameState.multiverse).filter(id => !localGameState.multiverse[id].isFrozen).length || 1;
@@ -228,23 +252,81 @@ window.onload = function() {
         }
         
         ctx.restore();
-        renderTimelineList();
+        renderTimelineTree();
     }
 
-    function renderTimelineList() {
-        const listElement = document.getElementById('timeline-list');
-        listElement.innerHTML = '';
-        for (const timelineId in localGameState.multiverse) {
-            const timeline = localGameState.multiverse[timelineId];
-            const li = document.createElement('li');
-            let statusText = `(Step: ${timeline.currentState.gameStep})`;
-            if (timeline.isFrozen) { statusText = `(FROZEN until ${timeline.freezeUntilStep})`; } else if (timeline.speedMultiplier > 1.0) { statusText = `(OVERCLOCKED until ${timeline.overclockUntilStep})`; }
-            if (timeline.anchorStep > 0) { statusText += ` (Anchored: ${timeline.anchorStep})`; }
-            li.textContent = `ID: ${timeline.id.split('-')[1]} ${statusText}`;
-            li.style.padding = '5px'; li.style.border = '1px solid #555'; li.style.marginBottom = '5px'; li.style.cursor = 'pointer';
-            li.dataset.timelineId = timeline.id;
-            if (timeline.id === activeTimelineId) { li.style.backgroundColor = '#007bff'; }
-            listElement.appendChild(li);
+    function renderTimelineTree() {
+        const PADDING = 20;
+        const X_SPACING = 50;
+        const Y_SCALE = 0.5;
+        
+        treeCtx.clearRect(0, 0, treeCanvas.width, treeCanvas.height);
+        treeCtx.fillStyle = '#FFFFFF';
+        treeCtx.strokeStyle = '#FFFFFF';
+        treeCtx.font = '12px sans-serif';
+
+        if (!localGameState.multiverse || Object.keys(localGameState.multiverse).length === 0) return;
+
+        let maxStep = 0;
+        for (const id in localGameState.multiverse) {
+            if (localGameState.multiverse[id].currentState.gameStep > maxStep) {
+                maxStep = localGameState.multiverse[id].currentState.gameStep;
+            }
+        }
+        maxStep = Math.max(maxStep, 1);
+
+        const timelinePositions = {};
+        const timelineLevels = {};
+        
+        function assignLevels(timelineId, level) {
+            if(timelineLevels[timelineId] !== undefined) return;
+            timelineLevels[timelineId] = level;
+            Object.values(localGameState.multiverse).forEach(child => {
+                if (child.parentId === timelineId) {
+                    assignLevels(child.id, level + 1);
+                }
+            });
+        }
+        assignLevels('timeline-alpha', 0);
+
+        Object.keys(timelineLevels).forEach(id => {
+            const level = timelineLevels[id];
+            timelinePositions[id] = { x: PADDING + level * X_SPACING };
+        });
+
+        for (const id in localGameState.multiverse) {
+            const timeline = localGameState.multiverse[id];
+            const pos = timelinePositions[id];
+            if (!pos) continue;
+
+            const startY = PADDING + timeline.splitStep * Y_SCALE;
+            const endY = PADDING + timeline.currentState.gameStep * Y_SCALE;
+            
+            // Draw line for timeline's existence
+            treeCtx.beginPath();
+            treeCtx.moveTo(pos.x, startY);
+            treeCtx.lineTo(pos.x, endY);
+            treeCtx.lineWidth = timeline.id === activeTimelineId ? 4 : 2;
+            treeCtx.strokeStyle = timeline.isUnravelling ? '#FF00FF' : '#FFFFFF';
+            treeCtx.stroke();
+
+            // Draw connecting line to parent
+            if (timeline.parentId && timelinePositions[timeline.parentId]) {
+                const parentPos = timelinePositions[timeline.parentId];
+                treeCtx.beginPath();
+                treeCtx.moveTo(parentPos.x, startY);
+                treeCtx.lineTo(pos.x, startY);
+                treeCtx.lineWidth = 1;
+                treeCtx.strokeStyle = '#888888';
+                treeCtx.stroke();
+            }
+            
+            // Draw node at the "now" point
+            treeCtx.beginPath();
+            treeCtx.arc(pos.x, endY, 5, 0, Math.PI * 2);
+            treeCtx.fillStyle = timeline.id === activeTimelineId ? '#007bff' : '#FFFFFF';
+            treeCtx.fill();
+            treeCtx.fillText(id.split('-')[1], pos.x + 10, endY + 4);
         }
     }
     
@@ -357,7 +439,6 @@ window.onload = function() {
 
         if (newIndex !== currentIndex) {
             activeTimelineId = timelineIds[newIndex];
-            renderTimelineList();
             updatePlayerListView();
         }
     });
@@ -400,7 +481,16 @@ window.onload = function() {
 
     document.getElementById('anchor-timeline-btn').addEventListener('click', () => { socket.emit('player-action', { type: 'ANCHOR', activeTimelineId: activeTimelineId }); });
     document.getElementById('hop-timeline-btn').addEventListener('click', () => { if (selectedTile) { socket.emit('player-action', { type: 'HOP', activeTimelineId: activeTimelineId, selectedTile: selectedTile }); } else { console.log("Client: Select a tile before opening a portal."); } });
-    document.getElementById('timeline-list').addEventListener('click', (event) => { if (event.target && event.target.nodeName === "LI") { const newActiveId = event.target.dataset.timelineId; if (newActiveId && newActiveId !== activeTimelineId) { activeTimelineId = newActiveId; renderTimelineList(); updatePlayerListView(); } } });
+    
+    // Simple click handler for the tree canvas to switch timelines
+    treeCanvas.addEventListener('click', (event) => {
+        // This is a simplified selection logic, more advanced would require hit-testing the nodes
+        const timelineIds = Object.keys(localGameState.multiverse);
+        const currentIndex = timelineIds.indexOf(activeTimelineId);
+        const newIndex = (currentIndex + 1) % timelineIds.length;
+        activeTimelineId = timelineIds[newIndex];
+        updatePlayerListView();
+    });
 
     // --- 5. GAME LOOPS ---
     function animationLoop() {
