@@ -11,11 +11,21 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 let BOARD_COLS = 40, BOARD_ROWS = 30;
 const GAME_TICK_MS = 500, MOVE_TICKS = 2, KEYFRAME_INTERVAL = 60;
-const TIME_ACTION_COST = { SPLIT: 50, FREEZE: 30, OVERCLOCK: 40, ANCHOR: 25, HOP: 75 };
-const TIME_ACTION_DURATION = { FREEZE_TICKS: 20, OVERCLOCK_TICKS: 20, HOP_TICKS: 30 };
+const TIME_ACTION_COST = { SPLIT: 50, ANCHOR: 25 }; // Removed dynamic costs
 const TILE_TYPE = { EMPTY: 0, MOUNTAIN: 1, CITY: 2, GENERAL: 3, FOREST: 4, ERASED: 5 };
 const PLAYER_COLORS = ['#007bff', '#dc3545', '#28a745', '#ffc107', '#17a2b8', '#6f42c1', '#fd7e14', '#e83e8c'];
 let game = createNewGame();
+
+// --- Dynamic Cost Formulas (Server-side) ---
+function calculateFreezeCost(duration) { return Math.floor(15 * Math.pow(1.07, duration / 5)); }
+function calculateOverclockCost(duration) { return Math.floor(20 * Math.pow(1.08, duration / 5)); }
+function calculatePortalCost(duration) { return Math.floor(40 * Math.pow(1.06, duration / 5)); }
+const COST_CALCULATORS = {
+    FREEZE: calculateFreezeCost,
+    OVERCLOCK: calculateOverclockCost,
+    HOP: calculatePortalCost,
+};
+
 
 function createNewGame() {
     return {
@@ -218,7 +228,7 @@ function runSingleTickLogic(currentGameState, timelineId, game) {
 
 
 function applyAction(gameState, action) {
-    const { type, playerId } = action;
+    const { type, playerId, cost } = action;
     const generalInfo = findGeneral(playerId, gameState);
 
     switch (type) {
@@ -237,16 +247,12 @@ function applyAction(gameState, action) {
             if (generalInfo) generalInfo.tile.army -= TIME_ACTION_COST.SPLIT;
             break;
         case 'FREEZE':
-            if (generalInfo) generalInfo.tile.army -= TIME_ACTION_COST.FREEZE;
-            break;
         case 'OVERCLOCK':
-            if (generalInfo) generalInfo.tile.army -= TIME_ACTION_COST.OVERCLOCK;
+        case 'HOP':
+             if (generalInfo) generalInfo.tile.army -= cost;
             break;
         case 'ANCHOR':
             if (generalInfo) generalInfo.tile.army -= TIME_ACTION_COST.ANCHOR;
-            break;
-        case 'HOP':
-            if (generalInfo) generalInfo.tile.army -= TIME_ACTION_COST.HOP;
             break;
     }
 }
@@ -449,31 +455,31 @@ function splitTimeline(playerId, activeTimelineId, game) {
     };
 }
 
-function freezeTimeline(playerId, activeTimelineId, game) {
+function freezeTimeline(playerId, activeTimelineId, game, duration, cost) {
     const timeline = game.multiverse[activeTimelineId];
     if (!timeline) return;
     const generalInfo = findGeneral(playerId, timeline.currentState);
-    if (!generalInfo || generalInfo.tile.army < TIME_ACTION_COST.FREEZE) return;
+    if (!generalInfo || generalInfo.tile.army < cost) return;
     
-    const action = { type: 'FREEZE', playerId };
+    const action = { type: 'FREEZE', playerId, cost, duration };
     timeline.actions.push({ step: timeline.currentState.gameStep, action });
     applyAction(timeline.currentState, action);
     
-    timeline.freezeUntilStep = timeline.currentState.gameStep + TIME_ACTION_DURATION.FREEZE_TICKS;
+    timeline.freezeUntilStep = timeline.currentState.gameStep + duration;
     timeline.isFrozen = true;
 }
 
-function overclockTimeline(playerId, activeTimelineId, game) {
+function overclockTimeline(playerId, activeTimelineId, game, duration, cost) {
     const timeline = game.multiverse[activeTimelineId];
     if (!timeline) return;
     const generalInfo = findGeneral(playerId, timeline.currentState);
-    if (!generalInfo || generalInfo.tile.army < TIME_ACTION_COST.OVERCLOCK) return;
+    if (!generalInfo || generalInfo.tile.army < cost) return;
 
-    const action = { type: 'OVERCLOCK', playerId };
+    const action = { type: 'OVERCLOCK', playerId, cost, duration };
     timeline.actions.push({ step: timeline.currentState.gameStep, action });
     applyAction(timeline.currentState, action);
 
-    timeline.overclockUntilStep = timeline.currentState.gameStep + TIME_ACTION_DURATION.OVERCLOCK_TICKS;
+    timeline.overclockUntilStep = timeline.currentState.gameStep + duration;
     timeline.speedMultiplier = 2.0;
 }
 
@@ -564,24 +570,26 @@ function anchorTimeline(playerId, activeTimelineId, game) {
     timeline.anchorStep = timeline.currentState.gameStep;
 }
 
-function openPortal(playerId, activeTimelineId, selectedTile, game) {
+function openPortal(playerId, activeTimelineId, selectedTile, game, duration, cost) {
     const fromTimeline = game.multiverse[activeTimelineId];
     if (!fromTimeline || !selectedTile) return;
     const fromGameState = fromTimeline.currentState;
     const portalTile = fromGameState.board[selectedTile.row][selectedTile.col];
     if (portalTile.ownerId !== playerId) return;
+
     const generalInfo = findGeneral(playerId, fromGameState);
-    if (!generalInfo || generalInfo.tile.army < TIME_ACTION_COST.HOP) return;
+    if (!generalInfo || generalInfo.tile.army < cost) return;
+
     const targetableTimelines = Object.keys(game.multiverse).filter(id => id !== activeTimelineId);
     if (targetableTimelines.length === 0) return;
     
-    const action = { type: 'HOP', playerId };
+    const action = { type: 'HOP', playerId, cost, duration };
     fromTimeline.actions.push({ step: fromGameState.gameStep, action });
     applyAction(fromGameState, action);
 
     const toTimelineId = targetableTimelines[0];
     const portalCoords = { row: selectedTile.row, col: selectedTile.col };
-    const expiresOnStep = fromGameState.gameStep + TIME_ACTION_DURATION.HOP_TICKS;
+    const expiresOnStep = fromGameState.gameStep + duration;
     game.portals.push({ fromTimelineId: activeTimelineId, toTimelineId: toTimelineId, coords: portalCoords, expiresOnStep: expiresOnStep });
     game.portals.push({ fromTimelineId: toTimelineId, toTimelineId: activeTimelineId, coords: portalCoords, expiresOnStep: expiresOnStep });
 }
@@ -722,6 +730,30 @@ io.on('connection', (socket) => {
         socket.emit('rollback-info-response', { oldestAffordableStep });
     });
 
+    socket.on('get-affordability-info', ({ actionType, activeTimelineId }) => {
+        const player = game.players[socket.id];
+        if (!player) return;
+        const timeline = game.multiverse[activeTimelineId];
+        if (!timeline) return;
+
+        const generalInfo = findGeneral(player.id, timeline.currentState);
+        if (!generalInfo) return;
+        
+        const generalArmy = generalInfo.tile.army;
+        const costCalculator = COST_CALCULATORS[actionType];
+        if (!costCalculator) return;
+
+        let maxDuration = 0;
+        for (let d = 1; d < 500; d++) { // Capped at 500 to prevent infinite loops
+            if (costCalculator(d) <= generalArmy) {
+                maxDuration = d;
+            } else {
+                break;
+            }
+        }
+        socket.emit('affordability-info-response', { actionType, maxDuration });
+    });
+
     socket.on('player-action', (action) => {
         if (!game.isGameRunning) return;
         const player = game.players[socket.id];
@@ -735,10 +767,10 @@ io.on('connection', (socket) => {
                 splitTimeline(player.id, action.activeTimelineId, game);
                 break;
             case 'FREEZE':
-                freezeTimeline(player.id, action.activeTimelineId, game);
+                freezeTimeline(player.id, action.activeTimelineId, game, action.duration, action.cost);
                 break;
             case 'OVERCLOCK':
-                overclockTimeline(player.id, action.activeTimelineId, game);
+                overclockTimeline(player.id, action.activeTimelineId, game, action.duration, action.cost);
                 break;
             case 'ROLLBACK':
                 rollbackTimeline(player.id, action.activeTimelineId, action.targetStep, game);
@@ -747,7 +779,7 @@ io.on('connection', (socket) => {
                 anchorTimeline(player.id, action.activeTimelineId, game);
                 break;
             case 'HOP':
-                openPortal(player.id, action.activeTimelineId, action.selectedTile, game);
+                openPortal(player.id, action.activeTimelineId, action.selectedTile, game, action.duration, action.cost);
                 break;
         }
     });

@@ -11,6 +11,16 @@ window.onload = function() {
     const MOVE_TICKS = 2; // Must match server
     const GAME_TICK_MS = 500; // Must match server
 
+    // --- Dynamic Cost Formulas (Client-side for UI) ---
+    function calculateFreezeCost(duration) { return Math.floor(15 * Math.pow(1.07, duration / 5)); }
+    function calculateOverclockCost(duration) { return Math.floor(20 * Math.pow(1.08, duration / 5)); }
+    function calculatePortalCost(duration) { return Math.floor(40 * Math.pow(1.06, duration / 5)); }
+    const COST_CALCULATORS = {
+        FREEZE: calculateFreezeCost,
+        OVERCLOCK: calculateOverclockCost,
+        HOP: calculatePortalCost,
+    };
+
     let localGameState = {
         multiverse: {}, portals: [], paradoxEvents: [], visibilityGrid: [],
         boardDimensions: { cols: 40, rows: 30 },
@@ -493,8 +503,6 @@ window.onload = function() {
 
     document.getElementById('fogToggle').addEventListener('change', (event) => { isFogOfWarEnabled = event.target.checked; });
     document.getElementById('split-timeline-btn').addEventListener('click', () => { socket.emit('player-action', { type: 'SPLIT', activeTimelineId: activeTimelineId }); });
-    document.getElementById('freeze-timeline-btn').addEventListener('click', () => { socket.emit('player-action', { type: 'FREEZE', activeTimelineId: activeTimelineId }); });
-    document.getElementById('overclock-timeline-btn').addEventListener('click', () => { socket.emit('player-action', { type: 'OVERCLOCK', activeTimelineId: activeTimelineId }); });
     
     document.getElementById('rollback-timeline-btn').addEventListener('click', () => {
         const currentStep = localGameState.multiverse[activeTimelineId]?.currentState.gameStep;
@@ -510,8 +518,8 @@ window.onload = function() {
         const targetStepInput = prompt(promptMessage, oldestAffordableStep);
         const targetStep = parseInt(targetStepInput);
 
-        if (isNaN(targetStep) || targetStep <= 0 || targetStep >= currentStep) {
-            alert("Invalid step number.");
+        if (!Number.isInteger(targetStep) || targetStep < oldestAffordableStep || targetStep >= currentStep) {
+            alert("Invalid or unaffordable step number.");
             return;
         }
 
@@ -527,8 +535,62 @@ window.onload = function() {
         }
     });
 
+    socket.on('affordability-info-response', ({ actionType, maxDuration }) => {
+        if (maxDuration <= 0) {
+            alert("You cannot afford to perform this action.");
+            return;
+        }
+        
+        const promptMessage = `Enter duration for ${actionType} (in steps).\nMax affordable duration: ${maxDuration} steps.`;
+        const durationInput = prompt(promptMessage, maxDuration);
+        const duration = parseInt(durationInput);
+
+        if (!Number.isInteger(duration) || duration <= 0 || duration > maxDuration) {
+            alert("Invalid or unaffordable duration.");
+            return;
+        }
+        
+        const costCalculator = COST_CALCULATORS[actionType];
+        if(!costCalculator) return;
+        
+        const cost = costCalculator(duration);
+
+        if (confirm(`This action will last for ${duration} steps and cost ${cost} army from your General.\n\nAre you sure?`)) {
+            const action = {
+                type: actionType,
+                activeTimelineId: activeTimelineId,
+                duration: duration,
+                cost: cost,
+            };
+            if(actionType === 'HOP') {
+                if(selectedTile) {
+                    action.selectedTile = selectedTile;
+                } else {
+                    alert("You must select a tile to open a portal.");
+                    return;
+                }
+            }
+            socket.emit('player-action', action);
+        }
+    });
+
     document.getElementById('anchor-timeline-btn').addEventListener('click', () => { socket.emit('player-action', { type: 'ANCHOR', activeTimelineId: activeTimelineId }); });
-    document.getElementById('hop-timeline-btn').addEventListener('click', () => { if (selectedTile) { socket.emit('player-action', { type: 'HOP', activeTimelineId: activeTimelineId, selectedTile: selectedTile }); } else { console.log("Client: Select a tile before opening a portal."); } });
+
+    // New listeners for dynamic cost actions
+    document.getElementById('freeze-timeline-btn').addEventListener('click', () => {
+        socket.emit('get-affordability-info', { actionType: 'FREEZE', activeTimelineId: activeTimelineId });
+    });
+    document.getElementById('overclock-timeline-btn').addEventListener('click', () => {
+        socket.emit('get-affordability-info', { actionType: 'OVERCLOCK', activeTimelineId: activeTimelineId });
+    });
+    document.getElementById('hop-timeline-btn').addEventListener('click', () => {
+        if (!selectedTile) {
+            alert("You must select a tile before opening a portal.");
+            return;
+        }
+        socket.emit('get-affordability-info', { actionType: 'HOP', activeTimelineId: activeTimelineId });
+    });
+
     
     // Simple click handler for the tree canvas to switch timelines
     treeCanvas.addEventListener('click', (event) => {
