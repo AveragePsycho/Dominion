@@ -426,20 +426,68 @@ window.onload = function() {
     
     window.addEventListener('keydown', (event) => {
         const timelineIds = Object.keys(localGameState.multiverse);
-        if (timelineIds.length <= 1) return;
 
-        const currentIndex = timelineIds.indexOf(activeTimelineId);
+        // Timeline switching
+        if (timelineIds.length > 1) {
+            const currentIndex = timelineIds.indexOf(activeTimelineId);
+            let newIndex = currentIndex;
+            if (event.key === 'e') {
+                newIndex = (currentIndex + 1) % timelineIds.length;
+            } else if (event.key === 'q') {
+                newIndex = (currentIndex - 1 + timelineIds.length) % timelineIds.length;
+            }
 
-        let newIndex = currentIndex;
-        if (event.key === 'e') {
-            newIndex = (currentIndex + 1) % timelineIds.length;
-        } else if (event.key === 'q') {
-            newIndex = (currentIndex - 1 + timelineIds.length) % timelineIds.length;
+            if (newIndex !== currentIndex) {
+                activeTimelineId = timelineIds[newIndex];
+                updatePlayerListView();
+            }
         }
 
-        if (newIndex !== currentIndex) {
-            activeTimelineId = timelineIds[newIndex];
-            updatePlayerListView();
+        // Keyboard movement commands
+        if (selectedTile) {
+            let dest = null;
+            switch (event.key) {
+                case 'w':
+                case 'ArrowUp':
+                    dest = { row: selectedTile.row - 1, col: selectedTile.col };
+                    event.preventDefault();
+                    break;
+                case 'a':
+                case 'ArrowLeft':
+                    dest = { row: selectedTile.row, col: selectedTile.col - 1 };
+                    event.preventDefault();
+                    break;
+                case 's':
+                case 'ArrowDown':
+                    dest = { row: selectedTile.row + 1, col: selectedTile.col };
+                    event.preventDefault();
+                    break;
+                case 'd':
+                case 'ArrowRight':
+                    dest = { row: selectedTile.row, col: selectedTile.col + 1 };
+                    event.preventDefault();
+                    break;
+            }
+
+            if (dest) {
+                if (dest.row >= 0 && dest.row < localGameState.boardDimensions.rows &&
+                    dest.col >= 0 && dest.col < localGameState.boardDimensions.cols) {
+                    
+                    const currentTimeline = localGameState.multiverse[activeTimelineId];
+                    if (currentTimeline) {
+                        const targetTile = currentTimeline.currentState.board[dest.row]?.[dest.col];
+                        if (targetTile && targetTile.type !== TILE_TYPE.MOUNTAIN) {
+                            const path = [selectedTile, dest];
+                            socket.emit('player-action', {
+                                type: 'MOVE',
+                                path: path,
+                                activeTimelineId: activeTimelineId
+                            });
+                            selectedTile = dest; // Update selection to follow the army
+                        }
+                    }
+                }
+            }
         }
     });
 
