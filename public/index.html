@@ -20,11 +20,11 @@
             </div>
             <div id="timeline-controls" class="hidden">
                 <h3>Timeline Controls</h3>
-                <button id="split-timeline-btn">Split Timeline (Cost: 50)</button>
+                <button id="split-timeline-btn">Split Timeline</button>
                 <button id="freeze-timeline-btn">Freeze Timeline</button>
                 <button id="overclock-timeline-btn">Overclock Timeline</button>
                 <button id="rollback-timeline-btn">Rollback Timeline</button>
-                <button id="anchor-timeline-btn">Anchor Timeline (Cost: 25)</button>
+                <button id="anchor-timeline-btn">Anchor Timeline (Cost: 200)</button>
                 <button id="hop-timeline-btn">Open Portal</button>
             </div>
             <div id="customization-container">
@@ -36,15 +36,19 @@
                             <input type="checkbox" id="fogToggle">
                         </div>
                         <div class="option-item">
-                            <label for="mountainPercent">0 - Mountains % - 50</label>
+                            <label for="gateTimeTravel">Gate Time Travel (1k Army)</label>
+                            <input type="checkbox" id="gateTimeTravel">
+                        </div>
+                        <div class="option-item">
+                            <label for="mountainPercent">Mountains %</label>
                             <input type="range" id="mountainPercent" min="0" max="50" >
                         </div>
                         <div class="option-item">
-                            <label for="forestPercent">0 - Forests % - 50</label>
+                            <label for="forestPercent">Forests %</label>
                             <input type="range" id="forestPercent" min="0" max="50" >
                         </div>
                          <div class="option-item">
-                            <label for="cityCount">0 - Cities (per 1200 tiles) - 20</label>
+                            <label for="cityCount">Cities (per 1200 tiles)</label>
                             <input type="range" id="cityCount" min="0" max="20" >
                         </div>
                     </div>
@@ -57,7 +61,7 @@
             <canvas id="gameCanvas"></canvas>
         </div>
 
-        <div id="timeline-list-container">
+        <div id="timeline-list-container" class="hidden">
             <h2>Active Timelines</h2>
             <canvas id="timeline-tree-canvas" width="300" height="600"></canvas>
         </div>

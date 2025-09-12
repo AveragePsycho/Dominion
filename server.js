@@ -11,7 +11,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 let BOARD_COLS = 40, BOARD_ROWS = 30;
 const GAME_TICK_MS = 500, MOVE_TICKS = 2, KEYFRAME_INTERVAL = 60;
-const TIME_ACTION_COST = { SPLIT: 50, ANCHOR: 25 };
+const TIME_ACTION_COST = { ANCHOR: 200, SPLIT_BASE: 250 };
 const TILE_TYPE = { EMPTY: 0, MOUNTAIN: 1, CITY: 2, GENERAL: 3, FOREST: 4, ERASED: 5 };
 const PLAYER_COLORS = ['#007bff', '#dc3545', '#28a745', '#ffc107', '#17a2b8', '#6f42c1', '#fd7e14', '#e83e8c'];
 let game = createNewGame();
@@ -30,13 +30,14 @@ function createNewGame() {
     return {
         multiverse: {}, portals: [], paradoxEvents: [], players: {}, playerCount: 0,
         gameInterval: null, boardDimensions: { cols: BOARD_COLS, rows: BOARD_ROWS }, 
-        gameState: 'LOBBY', // NEW: LOBBY, RUNNING, FINISHED
-        hostId: null, // NEW: socket.id of the host
-        settings: { // NEW: Default game settings
+        gameState: 'LOBBY',
+        hostId: null,
+        settings: {
             fogOfWar: true,
             mountainPercent: 10,
             forestPercent: 15,
-            cityCount: 8, // Represents cities per 1200 tiles (40x30)
+            cityCount: 8,
+            gateTimeTravel: false // New setting
         }
     };
 }
@@ -83,7 +84,6 @@ function initializeGame(game) {
         const currentRow = [];
         for (let col = 0; col < cols; col++) {
             const tile = { type: TILE_TYPE.EMPTY, ownerId: 0, army: 0 };
-            // USE SETTINGS for map generation
             if (Math.random() < game.settings.mountainPercent / 100) { tile.type = TILE_TYPE.MOUNTAIN; }
             else if (Math.random() < game.settings.forestPercent / 100) { tile.type = TILE_TYPE.FOREST; }
             currentRow.push(tile);
@@ -91,7 +91,6 @@ function initializeGame(game) {
         newBoard.push(currentRow);
     }
     initialGameState.board = newBoard;
-    // USE SETTINGS for city count
     const baseArea = 40*30;
     const currentArea = cols * rows;
     const numberOfCities = Math.floor(game.settings.cityCount * (currentArea/baseArea));
@@ -125,58 +124,64 @@ function initializeGame(game) {
     io.emit('game-start', { settings: game.settings });
 }
 
-// ... runSingleTickLogic, applyAction, calculatePlayerStats remain unchanged ...
-function runSingleTickLogic(currentGameState, timelineId, game) { for (let i = currentGameState.moves.length - 1; i >= 0; i--) { const move = currentGameState.moves[i]; move.progress++; if (move.progress >= MOVE_TICKS) { move.progress = 0; const leavingPos = move.path[move.pathIndex]; const isFinalSegment = move.pathIndex >= move.path.length - 2; const arrivingPos = move.path[move.pathIndex + 1]; if (!arrivingPos) { currentGameState.moves.splice(i, 1); continue; } const leavingTile = currentGameState.board[leavingPos.row][leavingPos.col]; const arrivingTile = currentGameState.board[arrivingPos.row][arrivingPos.col]; if (leavingTile.ownerId === move.ownerId) { move.army += leavingTile.army - 1; leavingTile.army = 1; } const propagateTag = () => { if (move.causalityTag) { arrivingTile.causalityTag = move.causalityTag; } }; if (arrivingTile.ownerId !== move.ownerId) { if (move.army > arrivingTile.army) { move.army -= arrivingTile.army; if (arrivingTile.type === TILE_TYPE.GENERAL) { handlePlayerDefeat(move.ownerId, arrivingTile.ownerId, currentGameState); } arrivingTile.ownerId = move.ownerId; if (isFinalSegment) { arrivingTile.army = move.army; } else { if (move.army > 1) { arrivingTile.army = 1; move.army -= 1; } else { arrivingTile.army = move.army; currentGameState.moves.splice(i, 1); } } propagateTag(); } else { arrivingTile.army -= move.army; currentGameState.moves.splice(i, 1); } } else { if (isFinalSegment) { arrivingTile.army += move.army; propagateTag(); } else { move.army += arrivingTile.army - 1; arrivingTile.army = 1; propagateTag(); } } if (isFinalSegment) { const portal = game.portals.find(p => p.fromTimelineId === timelineId && p.coords.row === arrivingPos.row && p.coords.col === arrivingPos.col); if (portal) { const toTimeline = game.multiverse[portal.toTimelineId]; if (toTimeline) { const exitTile = findValidAdjacentTile(portal.coords, toTimeline.currentState); if (exitTile) { const newPath = [exitTile]; const causalityTag = { originTimelineId: timelineId, originStep: currentGameState.gameStep }; const newMove = { ownerId: move.ownerId, army: move.army, path: newPath, pathIndex: 0, progress: 0, causalityTag }; toTimeline.currentState.moves.push(newMove); } else { arrivingTile.army += move.army; } } } currentGameState.moves.splice(i, 1); } else { if (currentGameState.moves.includes(move)) { move.pathIndex++; } } } } currentGameState.gameStep++; for (let row = 0; row < BOARD_ROWS; row++) { for (let col = 0; col < BOARD_COLS; col++) { const tile = currentGameState.board[row][col]; if (tile.ownerId !== 0) { if (tile.type === TILE_TYPE.GENERAL || tile.type === TILE_TYPE.CITY) { if (currentGameState.gameStep % 1 === 0) tile.army++; } else if (tile.type === TILE_TYPE.EMPTY || tile.type === TILE_TYPE.FOREST) { if (currentGameState.gameStep % 4 === 0) tile.army++; } } } } }
-function applyAction(gameState, action) { const { type, playerId, cost } = action; const generalInfo = findGeneral(playerId, gameState); switch (type) { case 'MOVE': const startTile = gameState.board[action.path[0].row][action.path[0].col]; if (startTile.army <= 1) break; const movingArmy = startTile.army - 1; startTile.army = 1; const newMove = { ownerId: playerId, army: movingArmy, path: action.path, pathIndex: 0, progress: 0 }; if (startTile.causalityTag) { newMove.causalityTag = startTile.causalityTag; } gameState.moves.push(newMove); break; case 'SPLIT': if (generalInfo) generalInfo.tile.army -= TIME_ACTION_COST.SPLIT; break; case 'FREEZE': case 'OVERCLOCK': case 'HOP': if (generalInfo) generalInfo.tile.army -= cost; break; case 'ANCHOR': if (generalInfo) generalInfo.tile.army -= TIME_ACTION_COST.ANCHOR; break; } }
-function calculatePlayerStats(game) { const stats = { global: {} }; for (const playerSocketId in game.players) { const player = game.players[playerSocketId]; stats.global[player.id] = { army: 0 }; } for (const timelineId in game.multiverse) { stats[timelineId] = {}; for (const playerSocketId in game.players) { const player = game.players[playerSocketId]; stats[timelineId][player.id] = { army: 0 }; } const gameState = game.multiverse[timelineId].currentState; for (let row = 0; row < BOARD_ROWS; row++) { for (let col = 0; col < BOARD_COLS; col++) { const tile = gameState.board[row][col]; if (tile.ownerId !== 0 && stats[timelineId][tile.ownerId]) { stats[timelineId][tile.ownerId].army += tile.army; stats.global[tile.ownerId].army += tile.army; } } } for (const move of gameState.moves) { if (move.ownerId !== 0 && stats[timelineId][move.ownerId]) { stats[timelineId][move.ownerId].army += move.army; stats.global[move.ownerId].army += move.army; } } } return stats; }
-
-function gameLoop(game) {
-    const activePlayers = new Set();
-    for (const timelineId in game.multiverse) {
-        const timeline = game.multiverse[timelineId];
-        if (timeline.isUnravelling) continue;
-        const currentGameState = timeline.currentState;
-        for (let row = 0; row < BOARD_ROWS; row++) {
-            for (let col = 0; col < BOARD_COLS; col++) {
-                const tile = currentGameState.board[row][col];
-                if (tile.type === TILE_TYPE.GENERAL && tile.ownerId !== 0) {
-                    activePlayers.add(tile.ownerId);
-                }
-            }
-        }
+function applyAction(gameState, action) {
+    const { type, playerId, cost } = action;
+    const generalInfo = findGeneral(playerId, gameState);
+    switch (type) {
+        case 'MOVE':
+            const startTile = gameState.board[action.path[0].row][action.path[0].col];
+            if (startTile.army <= 1) break;
+            const movingArmy = startTile.army - 1;
+            startTile.army = 1;
+            const newMove = { ownerId: playerId, army: movingArmy, path: action.path, pathIndex: 0, progress: 0 };
+            if (startTile.causalityTag) { newMove.causalityTag = startTile.causalityTag; }
+            gameState.moves.push(newMove);
+            break;
+        case 'SPLIT': // Now uses dynamic cost
+        case 'FREEZE':
+        case 'OVERCLOCK':
+        case 'HOP':
+             if (generalInfo) generalInfo.tile.army -= cost;
+            break;
+        case 'ANCHOR':
+            if (generalInfo) generalInfo.tile.army -= TIME_ACTION_COST.ANCHOR;
+            break;
     }
-
-    if (activePlayers.size <= 1 && game.playerCount > 1 && game.gameState === 'RUNNING') {
-        const winnerId = activePlayers.values().next().value || "No one";
-        io.emit('game-over', { winnerId });
-        clearTimeout(game.gameInterval);
-        game.gameState = 'FINISHED';
-        setTimeout(() => {
-            const connectedSockets = new Map(io.sockets.sockets);
-            game = createNewGame(); // Reset to a new lobby
-            let i = 1;
-            connectedSockets.forEach((socket, socketId) => {
-                const color = PLAYER_COLORS[(i-1) % PLAYER_COLORS.length];
-                game.players[socketId] = { id: i, name: `Player ${i}`, color: color, isReady: false };
-                if (game.hostId === null) { game.hostId = socket.id; }
-                socket.emit('player-assignment', {playerId: i, color: color});
-                i++;
-            });
-            game.playerCount = Object.keys(game.players).length;
-            const hostPlayerId = game.players[game.hostId]?.id;
-            io.emit('lobby-update', { players: Object.values(game.players), settings: game.settings, hostPlayerId });
-        }, 10000);
-        return;
-    }
-
-    // ... rest of gameLoop remains the same ...
-    const masterClock = game.multiverse['timeline-alpha'] ? game.multiverse['timeline-alpha'].currentState.gameStep : 0; game.portals = game.portals.filter(p => p.expiresOnStep > masterClock); paradoxHandler(game); game.paradoxEvents = game.paradoxEvents.filter(event => { event.duration--; return event.duration > 0; }); const timelineIds = Object.keys(game.multiverse); for (const timelineId of timelineIds) { const timeline = game.multiverse[timelineId]; if (!timeline) continue; if (timeline.isFrozen && timeline.currentState.gameStep >= timeline.freezeUntilStep) { timeline.isFrozen = false; timeline.freezeUntilStep = 0; } if (timeline.speedMultiplier > 1.0 && timeline.currentState.gameStep >= timeline.overclockUntilStep) { timeline.speedMultiplier = 1.0; timeline.overclockUntilStep = 0; } for (let i = 0; i < timeline.speedMultiplier; i++) { updateTimeline(timeline, timelineId, game); } }
 }
 
-// ... updateTimeline, paradoxHandler, splitTimeline, etc. remain unchanged ...
+function splitTimeline(playerId, activeTimelineId, game) {
+    const timeline = game.multiverse[activeTimelineId];
+    if (!timeline) return;
+
+    const numTimelines = Object.keys(game.multiverse).length;
+    const splitCost = Math.floor(TIME_ACTION_COST.SPLIT_BASE * Math.pow(1.25, numTimelines - 1));
+
+    const generalInfo = findGeneral(playerId, timeline.currentState);
+    if (!generalInfo || generalInfo.tile.army < splitCost) return;
+    
+    const action = { type: 'SPLIT', playerId, cost: splitCost }; // Pass cost to applyAction
+    timeline.actions.push({ step: timeline.currentState.gameStep, action });
+    applyAction(timeline.currentState, action);
+
+    const newGameState = JSON.parse(JSON.stringify(timeline.currentState));
+    const newTimelineId = `timeline-${Date.now()}`;
+    game.multiverse[newTimelineId] = {
+        id: newTimelineId,
+        currentState: newGameState,
+        keyframes: [{ step: newGameState.gameStep, gameState: JSON.parse(JSON.stringify(newGameState)) }],
+        actions: timeline.actions.filter(a => a.step <= newGameState.gameStep), 
+        isFrozen: false, freezeUntilStep: 0, overclockUntilStep: 0,
+        speedMultiplier: 1.0, anchorStep: newGameState.gameStep, parentId: activeTimelineId, splitStep: timeline.currentState.gameStep,
+        isUnravelling: false, unravelCenter: null, unravelRadius: 0
+    };
+}
+
+// ... other functions (runSingleTickLogic, calculatePlayerStats, gameLoop, etc.) remain unchanged ...
+function runSingleTickLogic(currentGameState, timelineId, game) { for (let i = currentGameState.moves.length - 1; i >= 0; i--) { const move = currentGameState.moves[i]; move.progress++; if (move.progress >= MOVE_TICKS) { move.progress = 0; const leavingPos = move.path[move.pathIndex]; const isFinalSegment = move.pathIndex >= move.path.length - 2; const arrivingPos = move.path[move.pathIndex + 1]; if (!arrivingPos) { currentGameState.moves.splice(i, 1); continue; } const leavingTile = currentGameState.board[leavingPos.row][leavingPos.col]; const arrivingTile = currentGameState.board[arrivingPos.row][arrivingPos.col]; if (leavingTile.ownerId === move.ownerId) { move.army += leavingTile.army - 1; leavingTile.army = 1; } const propagateTag = () => { if (move.causalityTag) { arrivingTile.causalityTag = move.causalityTag; } }; if (arrivingTile.ownerId !== move.ownerId) { if (move.army > arrivingTile.army) { move.army -= arrivingTile.army; if (arrivingTile.type === TILE_TYPE.GENERAL) { handlePlayerDefeat(move.ownerId, arrivingTile.ownerId, currentGameState); } arrivingTile.ownerId = move.ownerId; if (isFinalSegment) { arrivingTile.army = move.army; } else { if (move.army > 1) { arrivingTile.army = 1; move.army -= 1; } else { arrivingTile.army = move.army; currentGameState.moves.splice(i, 1); } } propagateTag(); } else { arrivingTile.army -= move.army; currentGameState.moves.splice(i, 1); } } else { if (isFinalSegment) { arrivingTile.army += move.army; propagateTag(); } else { move.army += arrivingTile.army - 1; arrivingTile.army = 1; propagateTag(); } } if (isFinalSegment) { const portal = game.portals.find(p => p.fromTimelineId === timelineId && p.coords.row === arrivingPos.row && p.coords.col === arrivingPos.col); if (portal) { const toTimeline = game.multiverse[portal.toTimelineId]; if (toTimeline) { const exitTile = findValidAdjacentTile(portal.coords, toTimeline.currentState); if (exitTile) { const newPath = [exitTile]; const causalityTag = { originTimelineId: timelineId, originStep: currentGameState.gameStep }; const newMove = { ownerId: move.ownerId, army: move.army, path: newPath, pathIndex: 0, progress: 0, causalityTag }; toTimeline.currentState.moves.push(newMove); } else { arrivingTile.army += move.army; } } } currentGameState.moves.splice(i, 1); } else { if (currentGameState.moves.includes(move)) { move.pathIndex++; } } } } currentGameState.gameStep++; for (let row = 0; row < BOARD_ROWS; row++) { for (let col = 0; col < BOARD_COLS; col++) { const tile = currentGameState.board[row][col]; if (tile.ownerId !== 0) { if (tile.type === TILE_TYPE.GENERAL || tile.type === TILE_TYPE.CITY) { if (currentGameState.gameStep % 1 === 0) tile.army++; } else if (tile.type === TILE_TYPE.EMPTY || tile.type === TILE_TYPE.FOREST) { if (currentGameState.gameStep % 4 === 0) tile.army++; } } } } }
+function calculatePlayerStats(game) { const stats = { global: {} }; for (const playerSocketId in game.players) { const player = game.players[playerSocketId]; stats.global[player.id] = { army: 0 }; } for (const timelineId in game.multiverse) { stats[timelineId] = {}; for (const playerSocketId in game.players) { const player = game.players[playerSocketId]; stats[timelineId][player.id] = { army: 0 }; } const gameState = game.multiverse[timelineId].currentState; for (let row = 0; row < BOARD_ROWS; row++) { for (let col = 0; col < BOARD_COLS; col++) { const tile = gameState.board[row][col]; if (tile.ownerId !== 0 && stats[timelineId][tile.ownerId]) { stats[timelineId][tile.ownerId].army += tile.army; stats.global[tile.ownerId].army += tile.army; } } } for (const move of gameState.moves) { if (move.ownerId !== 0 && stats[timelineId][move.ownerId]) { stats[timelineId][move.ownerId].army += move.army; stats.global[move.ownerId].army += move.army; } } } return stats; }
+function gameLoop(game) { const activePlayers = new Set(); for (const timelineId in game.multiverse) { const timeline = game.multiverse[timelineId]; if (timeline.isUnravelling) continue; const currentGameState = timeline.currentState; for (let row = 0; row < BOARD_ROWS; row++) { for (let col = 0; col < BOARD_COLS; col++) { const tile = currentGameState.board[row][col]; if (tile.type === TILE_TYPE.GENERAL && tile.ownerId !== 0) { activePlayers.add(tile.ownerId); } } } } if (activePlayers.size <= 1 && game.playerCount > 1 && game.gameState === 'RUNNING') { const winnerId = activePlayers.values().next().value || "No one"; io.emit('game-over', { winnerId }); clearTimeout(game.gameInterval); game.gameState = 'FINISHED'; setTimeout(() => { const connectedSockets = new Map(io.sockets.sockets); game = createNewGame(); let i = 1; connectedSockets.forEach((socket, socketId) => { const color = PLAYER_COLORS[(i-1) % PLAYER_COLORS.length]; game.players[socketId] = { id: i, name: `Player ${i}`, color: color, isReady: false }; if (game.hostId === null) { game.hostId = socket.id; } socket.emit('player-assignment', {playerId: i, color: color}); i++; }); game.playerCount = Object.keys(game.players).length; const hostPlayerId = game.players[game.hostId]?.id; io.emit('lobby-update', { players: Object.values(game.players), settings: game.settings, hostPlayerId }); }, 10000); return; } const masterClock = game.multiverse['timeline-alpha'] ? game.multiverse['timeline-alpha'].currentState.gameStep : 0; game.portals = game.portals.filter(p => p.expiresOnStep > masterClock); paradoxHandler(game); game.paradoxEvents = game.paradoxEvents.filter(event => { event.duration--; return event.duration > 0; }); const timelineIds = Object.keys(game.multiverse); for (const timelineId of timelineIds) { const timeline = game.multiverse[timelineId]; if (!timeline) continue; if (timeline.isFrozen && timeline.currentState.gameStep >= timeline.freezeUntilStep) { timeline.isFrozen = false; timeline.freezeUntilStep = 0; } if (timeline.speedMultiplier > 1.0 && timeline.currentState.gameStep >= timeline.overclockUntilStep) { timeline.speedMultiplier = 1.0; timeline.overclockUntilStep = 0; } for (let i = 0; i < timeline.speedMultiplier; i++) { updateTimeline(timeline, timelineId, game); } } }
 function updateTimeline(timeline, timelineId, game) { if (timeline.isFrozen || timeline.isUnravelling) { if (!timeline.isUnravelling) timeline.currentState.gameStep++; return; } runSingleTickLogic(timeline.currentState, timelineId, game); if (timeline.currentState.gameStep % KEYFRAME_INTERVAL === 0) { timeline.keyframes.push({ step: timeline.currentState.gameStep, gameState: JSON.parse(JSON.stringify(timeline.currentState)) }); if (timeline.keyframes.length > 30) { timeline.keyframes.shift(); } } }
 function paradoxHandler(game) { for (const timelineId in game.multiverse) { const timeline = game.multiverse[timelineId]; if (timeline.isUnravelling) { timeline.unravelRadius += 1; const { unravelCenter, unravelRadius } = timeline; let tilesRemaining = false; for (let row = 0; row < BOARD_ROWS; row++) { for (let col = 0; col < BOARD_COLS; col++) { const tile = timeline.currentState.board[row][col]; if (tile.type !== TILE_TYPE.ERASED) { const dist = Math.sqrt(Math.pow(row - unravelCenter.row, 2) + Math.pow(col - unravelCenter.col, 2)); if (dist <= unravelRadius) { tile.type = TILE_TYPE.ERASED; tile.army = 0; tile.ownerId = 0; } else { tilesRemaining = true; } } } } if (!tilesRemaining) { delete game.multiverse[timelineId]; } } } for (const timelineId in game.multiverse) { const timeline = game.multiverse[timelineId]; const currentGameState = timeline.currentState; for (let row = 0; row < BOARD_ROWS; row++) { for (let col = 0; col < BOARD_COLS; col++) { const tile = currentGameState.board[row][col]; if (tile.causalityTag) { const origin = game.multiverse[tile.causalityTag.originTimelineId]; if (!origin || origin.currentState.gameStep < tile.causalityTag.originStep || origin.isUnravelling) { tile.army = 0; delete tile.causalityTag; game.paradoxEvents.push({ timelineId, coords: { row, col }, duration: 10 }); } } } } for (let i = currentGameState.moves.length - 1; i >= 0; i--) { const move = currentGameState.moves[i]; if (move.causalityTag) { const origin = game.multiverse[move.causalityTag.originTimelineId]; if (!origin || origin.currentState.gameStep < move.causalityTag.originStep || origin.isUnravelling) { const coords = move.path[move.pathIndex]; game.paradoxEvents.push({ timelineId, coords, duration: 10 }); currentGameState.moves.splice(i, 1); } } } } }
-function splitTimeline(playerId, activeTimelineId, game) { const timeline = game.multiverse[activeTimelineId]; if (!timeline) return; const generalInfo = findGeneral(playerId, timeline.currentState); if (!generalInfo || generalInfo.tile.army < TIME_ACTION_COST.SPLIT) return; const action = { type: 'SPLIT', playerId }; timeline.actions.push({ step: timeline.currentState.gameStep, action }); applyAction(timeline.currentState, action); const newGameState = JSON.parse(JSON.stringify(timeline.currentState)); const newTimelineId = `timeline-${Date.now()}`; game.multiverse[newTimelineId] = { id: newTimelineId, currentState: newGameState, keyframes: [{ step: newGameState.gameStep, gameState: JSON.parse(JSON.stringify(newGameState)) }], actions: timeline.actions.filter(a => a.step <= newGameState.gameStep), isFrozen: false, freezeUntilStep: 0, overclockUntilStep: 0, speedMultiplier: 1.0, anchorStep: newGameState.gameStep, parentId: activeTimelineId, splitStep: timeline.currentState.gameStep, isUnravelling: false, unravelCenter: null, unravelRadius: 0 }; }
 function freezeTimeline(playerId, activeTimelineId, game, duration, cost) { const timeline = game.multiverse[activeTimelineId]; if (!timeline) return; const generalInfo = findGeneral(playerId, timeline.currentState); if (!generalInfo || generalInfo.tile.army < cost) return; const action = { type: 'FREEZE', playerId, cost, duration }; timeline.actions.push({ step: timeline.currentState.gameStep, action }); applyAction(timeline.currentState, action); timeline.freezeUntilStep = timeline.currentState.gameStep + duration; timeline.isFrozen = true; }
 function overclockTimeline(playerId, activeTimelineId, game, duration, cost) { const timeline = game.multiverse[activeTimelineId]; if (!timeline) return; const generalInfo = findGeneral(playerId, timeline.currentState); if (!generalInfo || generalInfo.tile.army < cost) return; const action = { type: 'OVERCLOCK', playerId, cost, duration }; timeline.actions.push({ step: timeline.currentState.gameStep, action }); applyAction(timeline.currentState, action); timeline.overclockUntilStep = timeline.currentState.gameStep + duration; timeline.speedMultiplier = 2.0; }
 function rollbackTimeline(playerId, activeTimelineId, targetStep, game) { const timeline = game.multiverse[activeTimelineId]; if (!timeline) return; if (targetStep < timeline.anchorStep || targetStep >= timeline.currentState.gameStep) return; const lastKeyframe = [...timeline.keyframes].reverse().find(kf => kf.step <= targetStep); if (!lastKeyframe) { return; } let preSimState = JSON.parse(JSON.stringify(lastKeyframe.gameState)); const actionsToReplay = timeline.actions.filter(a => a.step > lastKeyframe.step && a.step <= targetStep); for (let step = lastKeyframe.step; step < targetStep; step++) { for (const actionRecord of actionsToReplay) { if (actionRecord.step === step) { applyAction(preSimState, actionRecord.action); } } runSingleTickLogic(preSimState, activeTimelineId, game); } const generalInPast = findGeneral(playerId, preSimState); const stepsToRollback = timeline.currentState.gameStep - targetStep; const rollbackCost = Math.floor(10 * Math.pow(1.05, stepsToRollback / 10)); if (!generalInPast || generalInPast.tile.army < rollbackCost) { return; } generalInPast.tile.army -= rollbackCost; timeline.currentState = preSimState; timeline.actions = timeline.actions.filter(a => a.step <= targetStep); timeline.keyframes = timeline.keyframes.filter(kf => kf.step <= targetStep); const unravelQueue = []; for (const otherTimelineId in game.multiverse) { const otherTimeline = game.multiverse[otherTimelineId]; if (otherTimeline.parentId === activeTimelineId && otherTimeline.splitStep > timeline.currentState.gameStep) { if (!unravelQueue.includes(otherTimeline.id)) { unravelQueue.push(otherTimeline.id); } } } let i = 0; while (i < unravelQueue.length) { const parentIdToUnravel = unravelQueue[i]; i++; for (const childId in game.multiverse) { const childTimeline = game.multiverse[childId]; if (childTimeline.parentId === parentIdToUnravel) { if (!unravelQueue.includes(childTimeline.id)) { unravelQueue.push(childTimeline.id); } } } } for (const timelineIdToUnravel of unravelQueue) { const timelineToUnravel = game.multiverse[timelineIdToUnravel]; if (timelineToUnravel) { timelineToUnravel.isUnravelling = true; timelineToUnravel.unravelCenter = { row: Math.floor(BOARD_ROWS / 2), col: Math.floor(BOARD_COLS / 2) }; } } }
@@ -210,8 +215,8 @@ io.on('connection', (socket) => {
 
     socket.on('update-game-settings', (newSettings) => {
         if (socket.id === game.hostId && game.gameState === 'LOBBY') {
-            // Basic validation
             game.settings.fogOfWar = !!newSettings.fogOfWar;
+            game.settings.gateTimeTravel = !!newSettings.gateTimeTravel;
             game.settings.mountainPercent = Math.max(0, Math.min(50, parseInt(newSettings.mountainPercent) || 0));
             game.settings.forestPercent = Math.max(0, Math.min(50, parseInt(newSettings.forestPercent) || 0));
             game.settings.cityCount = Math.max(0, Math.min(20, parseInt(newSettings.cityCount) || 0));
@@ -231,7 +236,7 @@ io.on('connection', (socket) => {
             const allPlayers = Object.values(game.players);
             const allReady = allPlayers.length > 0 && allPlayers.every(p => p.isReady);
 
-            if (allReady) { // Min player count check can be added here
+            if (allReady && allPlayers.length >= 2) {
                 initializeGame(game);
                 const dynamicGameLoop = () => {
                     if (game.gameState !== 'RUNNING') return;
@@ -266,7 +271,6 @@ io.on('connection', (socket) => {
         }
     });
 
-    // ... get-rollback-info, get-affordability-info, and player-action handlers remain unchanged ...
     socket.on('get-rollback-info', ({ activeTimelineId }) => { const player = game.players[socket.id]; if (!player) return; const timeline = game.multiverse[activeTimelineId]; if (!timeline) return; let oldestAffordableStep = timeline.currentState.gameStep; for (let step = timeline.currentState.gameStep -1; step >= timeline.anchorStep; step--) { const lastKeyframe = [...timeline.keyframes].reverse().find(kf => kf.step <= step); if (!lastKeyframe) break; let tempState = JSON.parse(JSON.stringify(lastKeyframe.gameState)); const actionsToReplay = timeline.actions.filter(a => a.step > lastKeyframe.step && a.step <= step); for (let s = lastKeyframe.step; s < step; s++) { for (const actionRecord of actionsToReplay) { if (actionRecord.step === s) applyAction(tempState, actionRecord.action); } runSingleTickLogic(tempState, activeTimelineId, game); } const generalInPast = findGeneral(player.id, tempState); const stepsToRollback = timeline.currentState.gameStep - step; const cost = Math.floor(10 * Math.pow(1.05, stepsToRollback / 10)); if (generalInPast && generalInPast.tile.army >= cost) { oldestAffordableStep = step; } else { break; } } socket.emit('rollback-info-response', { oldestAffordableStep }); });
     socket.on('get-affordability-info', ({ actionType, activeTimelineId }) => { const player = game.players[socket.id]; if (!player) return; const timeline = game.multiverse[activeTimelineId]; if (!timeline) return; const generalInfo = findGeneral(player.id, timeline.currentState); if (!generalInfo) return; const generalArmy = generalInfo.tile.army; const costCalculator = COST_CALCULATORS[actionType]; if (!costCalculator) return; let maxDuration = 0; for (let d = 1; d < 500; d++) { if (costCalculator(d) <= generalArmy) { maxDuration = d; } else { break; } } socket.emit('affordability-info-response', { actionType, maxDuration }); });
     socket.on('player-action', (action) => { if (game.gameState !== 'RUNNING') return; const player = game.players[socket.id]; if (!player) return; switch (action.type) { case 'MOVE': processMove(player.id, action.path, action.activeTimelineId, game); break; case 'SPLIT': splitTimeline(player.id, action.activeTimelineId, game); break; case 'FREEZE': freezeTimeline(player.id, action.activeTimelineId, game, action.duration, action.cost); break; case 'OVERCLOCK': overclockTimeline(player.id, action.activeTimelineId, game, action.duration, action.cost); break; case 'ROLLBACK': rollbackTimeline(player.id, action.activeTimelineId, action.targetStep, game); break; case 'ANCHOR': anchorTimeline(player.id, action.activeTimelineId, game); break; case 'HOP': openPortal(player.id, action.activeTimelineId, action.selectedTile, game, action.duration, action.cost); break; } });
