@@ -7,6 +7,74 @@ Welcome to Dominion, my incredibly fuckass spin on Generals.IO, with time travel
 Real Time, Time Strategy, for those who crave migraines.
 
 
+
+Welcome to Dominion! This is a guide to the basic features of the game.
+
+--- The Goal ---
+Dominion is a real-time strategy game about conquering territory and manipulating time itself. The ultimate objective is simple: be the last player with a General on the board. Capturing an opponent's General eliminates them and gives you all their land and armies.
+
+Core Gameplay: Expand, Accumulate, Conquer
+
+Your success depends on a simple loop:
+
+    Expand: Capture new land to grow your empire.
+
+    Accumulate: More land means more soldiers. Soldiers are your only resource.
+
+    Conquer: Use your armies to defeat your opponents.
+
+--- Movement and Combat ---
+
+    To Move: Click and drag with your left mouse button from a tile you own to create a path. Your army will follow it.
+
+    To Split Your Army: Right-click and drag to send only half the soldiers from a tile. The other half stays behind.
+
+    Combat: When your army enters an enemy tile, the larger army wins.
+
+    Snowballing: If your moving army crosses a friendly tile, it will pick up all the soldiers on that tile (leaving one behind) and add them to its ranks, creating a massive force.
+
+--- The Map Tiles ---
+
+    Land: Basic territory. Generates 1 soldier every 20 game steps when you own it.
+
+    City: A valuable neutral tile. Generates 1 soldier every second game step.
+
+    Forest: Hides the exact number of soldiers on a tile from your enemies.
+
+    Mountain: Impassable terrain. Armies must go around it.
+
+    General: Your most important unit. It acts like a City, generating 1 soldier every second game step. If you lose your General, you are defeated. You must lose all of your generals to be truly defeated.
+
+--- Time Manipulation ---
+
+The true power in Dominion comes from sacrificing armies from your General's tile to perform incredible time-based actions. These powers are accessed from the Timeline Controls panel on the left side of the screen.
+
+The Timeline Tree
+
+On the right side of the screen, you will see a visual tree representing all active timelines (or universes). You can only see and interact with one timeline at a time.
+
+    Press 'Q' and 'E' to cycle between your active timelines.
+
+    The currently selected timeline is highlighted in the tree.
+
+Time Powers
+
+    Split Timeline: Creates a perfect copy of your current timeline at that exact moment. You now have two universes to manage and attack from! Be warned: the more active timelines there are, the slower the game gets for everyone to give people time to manage their multiversal armies.
+
+    Freeze Timeline: Temporarily pauses all activity in a timeline for a set duration. A great way to stop an enemy advance or buy yourself time.
+
+    Overclock Timeline: Doubles the speed of a single timeline. Everything in it—army generation, movement—happens twice as fast.
+
+    Open Portal (Hop): Creates a portal on a selected tile that links it to the same tile in another timeline. For a short time, your armies can travel between universes!
+
+    Rollback Timeline: This is an "undo" button. It reverts a timeline to a point in its recent past, erasing everything that happened since.
+
+    Anchor Timeline: Sets a "save point" in a timeline. Once an anchor is placed, no player can roll that timeline back to a point before the anchor.
+
+Now you know the basics. 
+
+Modo, veni, vici.
+
 Running the project as a local host:
 
 Requirements:
