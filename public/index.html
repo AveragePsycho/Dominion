@@ -18,7 +18,7 @@
                 <div id="player-list"></div>
                 <button id="ready-btn">Ready Up</button>
             </div>
-            <div id="timeline-controls">
+            <div id="timeline-controls" class="hidden">
                 <h3>Timeline Controls</h3>
                 <button id="split-timeline-btn">Split Timeline (Cost: 50)</button>
                 <button id="freeze-timeline-btn">Freeze Timeline</button>
@@ -27,10 +27,29 @@
                 <button id="anchor-timeline-btn">Anchor Timeline (Cost: 25)</button>
                 <button id="hop-timeline-btn">Open Portal</button>
             </div>
-             <label>
-                <input type="checkbox" id="fogToggle" checked>
-                Enable Fog of War
-            </label>
+            <div id="customization-container">
+                <details open>
+                    <summary>Game Customizations</summary>
+                    <div class="customization-options">
+                        <div class="option-item">
+                            <label for="fogToggle">Enforce Fog of War</label>
+                            <input type="checkbox" id="fogToggle">
+                        </div>
+                        <div class="option-item">
+                            <label for="mountainPercent">0 - Mountains % - 50</label>
+                            <input type="range" id="mountainPercent" min="0" max="50" >
+                        </div>
+                        <div class="option-item">
+                            <label for="forestPercent">0 - Forests % - 50</label>
+                            <input type="range" id="forestPercent" min="0" max="50" >
+                        </div>
+                         <div class="option-item">
+                            <label for="cityCount">0 - Cities (per 1200 tiles) - 20</label>
+                            <input type="range" id="cityCount" min="0" max="20" >
+                        </div>
+                    </div>
+                </details>
+            </div>
         </div>
 
         <div id="canvas-container">
