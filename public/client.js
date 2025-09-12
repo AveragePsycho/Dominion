@@ -25,13 +25,13 @@ window.onload = function() {
         multiverse: {}, portals: [], paradoxEvents: [], visibilityGrid: [],
         boardDimensions: { cols: 40, rows: 30 },
         playerStats: {},
-        settings: {} // NEW: To store game settings from server
+        settings: {}
     };
     let myPlayerId = null, myColor = '#FFFFFF', activeTimelineId = 'timeline-alpha';
     let inputState = { isDragging: false, startTile: null, path: [], endTile: null };
-    let selectedTile = null, isFogOfWarEnabled = true; // isFogOfWarEnabled will be set by server on game-start
+    let selectedTile = null, isFogOfWarEnabled = true;
     let isReady = false;
-    let isHost = false; // NEW
+    let isHost = false;
     let players = [];
     
     // --- Client-side animation state ---
@@ -54,13 +54,14 @@ window.onload = function() {
     const timelineListContainer = document.getElementById('timeline-list-container');
     const customizationContainer = document.getElementById('customization-container');
 
-    // --- Customization UI Elements ---
+    // --- Customization UI Elements (FIXED) ---
     const fogToggle = document.getElementById('fogToggle');
-    const gateTimeTravel = document.getElementById('gateTimeTravel');
+    const staggeredStartToggle = document.getElementById('staggeredStartToggle');
+    const fairGeneralsToggle = document.getElementById('fairGeneralsToggle');
     const mountainPercent = document.getElementById('mountainPercent');
     const forestPercent = document.getElementById('forestPercent');
     const cityCount = document.getElementById('cityCount');
-    const allCustomizationInputs = [fogToggle, mountainPercent, forestPercent, cityCount, gateTimeTravel];
+    const allCustomizationInputs = [fogToggle, staggeredStartToggle, fairGeneralsToggle, mountainPercent, forestPercent, cityCount];
 
 
     // --- Custom Modal Elements and Logic ---
@@ -149,7 +150,7 @@ window.onload = function() {
         }
 
         // Gated time travel UI check
-        if (localGameState.settings && localGameState.settings.gateTimeTravel) {
+        if (localGameState.settings && localGameState.settings.staggeredStart) {
             const stats = localGameState.playerStats;
             const totalArmy = stats?.global?.[myPlayerId]?.army || 0;
             if (totalArmy >= 1000) {
@@ -171,7 +172,6 @@ window.onload = function() {
                 const readyStatus = player.isReady ? '✔️ Ready' : '❌ Not Ready';
                 const hostLabel = player.id === hostPlayerId ? ' (Host)' : '';
                 
-                // --- FIX --- Only show army count if the game is running (multiverse is populated)
                 let armyDisplay = '';
                 if (Object.keys(localGameState.multiverse).length > 0) {
                     const armyCount = localGameState.playerStats?.[activeTimelineId]?.[player.id]?.army || 0;
@@ -190,7 +190,8 @@ window.onload = function() {
     function updateLobbyUI(settings) {
         allCustomizationInputs.forEach(input => input.disabled = !isHost);
         fogToggle.checked = settings.fogOfWar;
-        gateTimeTravel.checked = settings.gateTimeTravel;
+        staggeredStartToggle.checked = settings.staggeredStart;
+        fairGeneralsToggle.checked = settings.fairGenerals;
         mountainPercent.value = settings.mountainPercent;
         forestPercent.value = settings.forestPercent;
         cityCount.value = settings.cityCount;
@@ -200,7 +201,8 @@ window.onload = function() {
         if (!isHost) return;
         const newSettings = {
             fogOfWar: fogToggle.checked,
-            gateTimeTravel: gateTimeTravel.checked,
+            staggeredStart: staggeredStartToggle.checked,
+            fairGenerals: fairGeneralsToggle.checked,
             mountainPercent: mountainPercent.value,
             forestPercent: forestPercent.value,
             cityCount: cityCount.value
@@ -215,7 +217,7 @@ window.onload = function() {
         customizationContainer.classList.add('hidden');
         isFogOfWarEnabled = settings.fogOfWar;
 
-        if (!settings.gateTimeTravel) {
+        if (!settings.staggeredStart) {
             timelineControls.classList.remove('hidden');
             timelineListContainer.classList.remove('hidden');
         }

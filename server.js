@@ -11,9 +11,25 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 let BOARD_COLS = 40, BOARD_ROWS = 30;
 const GAME_TICK_MS = 500, MOVE_TICKS = 2, KEYFRAME_INTERVAL = 60;
+const MAX_PLAYERS = 64;
 const TIME_ACTION_COST = { ANCHOR: 200, SPLIT_BASE: 250 };
 const TILE_TYPE = { EMPTY: 0, MOUNTAIN: 1, CITY: 2, GENERAL: 3, FOREST: 4, ERASED: 5 };
-const PLAYER_COLORS = ['#007bff', '#dc3545', '#28a745', '#ffc107', '#17a2b8', '#6f42c1', '#fd7e14', '#e83e8c'];
+
+function generatePlayerColors(count) {
+    const colors = [];
+    const saturation = 90;
+    const lightness = 60;
+    // Using the golden ratio conjugate to ensure colors are maximally distinct
+    const goldenRatioConjugate = 0.61803398875;
+    let hue = Math.random() * 360; // Start at a random hue for variety each server restart
+
+    for (let i = 0; i < count; i++) {
+        hue = (hue + 360 * goldenRatioConjugate) % 360;
+        colors.push(`hsl(${Math.round(hue)}, ${saturation}%, ${lightness}%)`);
+    }
+    return colors;
+}
+const PLAYER_COLORS = generatePlayerColors(MAX_PLAYERS);
 let game = createNewGame();
 
 // --- Dynamic Cost Formulas (Server-side) ---
@@ -37,7 +53,8 @@ function createNewGame() {
             mountainPercent: 10,
             forestPercent: 15,
             cityCount: 8,
-            gateTimeTravel: false // New setting
+            staggeredStart: false,
+            fairGenerals: true
         }
     };
 }
@@ -94,20 +111,24 @@ function initializeGame(game) {
     const baseArea = 40*30;
     const currentArea = cols * rows;
     const numberOfCities = Math.floor(game.settings.cityCount * (currentArea/baseArea));
+    let maxNeutralArmy = 1;
 
     for (let i = 0; i < numberOfCities; i++) {
         let cityRow, cityCol;
         do { cityRow = Math.floor(Math.random() * rows); cityCol = Math.floor(Math.random() * cols); }
         while (initialGameState.board[cityRow][cityCol].type !== TILE_TYPE.EMPTY);
         const cityTile = initialGameState.board[cityRow][cityCol];
-        cityTile.type = TILE_TYPE.CITY; cityTile.army = 40 + Math.floor(Math.random() * 20);
+        cityTile.type = TILE_TYPE.CITY;
+        cityTile.army = 40 + Math.floor(Math.random() * 20);
+        if (cityTile.army > maxNeutralArmy) maxNeutralArmy = cityTile.army;
     }
     const spawnPoints = generateSpawnPoints(game.boardDimensions, game.playerCount);
+    const startingArmy = game.settings.fairGenerals ? maxNeutralArmy : 1;
     spawnPoints.forEach(spawn => {
         if (initialGameState.board[spawn.row][spawn.col].type === TILE_TYPE.MOUNTAIN) {
             initialGameState.board[spawn.row][spawn.col].type = TILE_TYPE.EMPTY;
         }
-        initialGameState.board[spawn.row][spawn.col] = { type: TILE_TYPE.GENERAL, ownerId: spawn.playerId, army: 1 };
+        initialGameState.board[spawn.row][spawn.col] = { type: TILE_TYPE.GENERAL, ownerId: spawn.playerId, army: startingArmy };
     });
     
     const firstTimelineId = 'timeline-alpha';
@@ -137,7 +158,7 @@ function applyAction(gameState, action) {
             if (startTile.causalityTag) { newMove.causalityTag = startTile.causalityTag; }
             gameState.moves.push(newMove);
             break;
-        case 'SPLIT': // Now uses dynamic cost
+        case 'SPLIT':
         case 'FREEZE':
         case 'OVERCLOCK':
         case 'HOP':
@@ -159,7 +180,7 @@ function splitTimeline(playerId, activeTimelineId, game) {
     const generalInfo = findGeneral(playerId, timeline.currentState);
     if (!generalInfo || generalInfo.tile.army < splitCost) return;
     
-    const action = { type: 'SPLIT', playerId, cost: splitCost }; // Pass cost to applyAction
+    const action = { type: 'SPLIT', playerId, cost: splitCost };
     timeline.actions.push({ step: timeline.currentState.gameStep, action });
     applyAction(timeline.currentState, action);
 
@@ -194,7 +215,7 @@ function findValidAdjacentTile(coords, currentGameState) { const { row, col } = 
 function calculateVisibility(playerId, game) { const visibilityGrid = Array(BOARD_ROWS).fill(null).map(() => Array(BOARD_COLS).fill(false)); if (!game.settings.fogOfWar) { return visibilityGrid.map(row => row.fill(true)); } const visibilityRadius = 2; for(const timelineId in game.multiverse){ const currentGameState = game.multiverse[timelineId].currentState; for (let row = 0; row < BOARD_ROWS; row++) { for (let col = 0; col < BOARD_COLS; col++) { if (currentGameState.board[row][col].ownerId === playerId) { for (let scanRow = row - visibilityRadius; scanRow <= row + visibilityRadius; scanRow++) { for (let scanCol = col - visibilityRadius; scanCol <= col + visibilityRadius; scanCol++) { if (scanRow >= 0 && scanRow < BOARD_ROWS && scanCol >= 0 && scanCol < BOARD_COLS) visibilityGrid[scanRow][scanCol] = true; } } } } } } return visibilityGrid; }
 
 io.on('connection', (socket) => {
-    if (game.gameState === 'RUNNING') {
+    if (game.playerCount >= MAX_PLAYERS || game.gameState === 'RUNNING') {
         socket.emit('game-in-progress');
         socket.disconnect();
         return;
@@ -216,7 +237,8 @@ io.on('connection', (socket) => {
     socket.on('update-game-settings', (newSettings) => {
         if (socket.id === game.hostId && game.gameState === 'LOBBY') {
             game.settings.fogOfWar = !!newSettings.fogOfWar;
-            game.settings.gateTimeTravel = !!newSettings.gateTimeTravel;
+            game.settings.staggeredStart = !!newSettings.staggeredStart;
+            game.settings.fairGenerals = !!newSettings.fairGenerals;
             game.settings.mountainPercent = Math.max(0, Math.min(50, parseInt(newSettings.mountainPercent) || 0));
             game.settings.forestPercent = Math.max(0, Math.min(50, parseInt(newSettings.forestPercent) || 0));
             game.settings.cityCount = Math.max(0, Math.min(20, parseInt(newSettings.cityCount) || 0));
