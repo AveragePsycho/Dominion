@@ -57,6 +57,7 @@ button.ready {
     gap: 20px;
     overflow-y: auto;
     min-width: 250px;
+    position: relative; /* This is needed for the scrubber */
 }
 
 #timeline-controls button {
@@ -80,6 +81,22 @@ button.ready {
     border: 1px solid #444;
 }
 
+#timeline-scrubber {
+    position: absolute;
+    /* Adjust positioning relative to the container's padding */
+    left: 15px; /* Aligns with the container's padding */
+    top: 0; /* JS will control this */
+    width: 14px;
+    height: 14px;
+    background-color: #ffc107;
+    border: 2px solid #000;
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    cursor: grab;
+    z-index: 10;
+    pointer-events: none; /* Prevents it from interfering with mouse events on the canvas */
+}
+
 #game-status {
     position: absolute;
     top: 10px;
@@ -91,6 +108,32 @@ button.ready {
     border-radius: 5px;
     font-size: 1.2em;
 }
+
+/* --- History Preview Styles --- */
+#history-preview-container {
+    margin-top: 15px;
+    border: 1px solid #666;
+    background-color: #2a2a2a;
+    border-radius: 4px;
+}
+#history-preview-canvas {
+    border: none;
+    border-bottom: 1px solid #666;
+    width: 100%;
+    height: auto;
+    aspect-ratio: 1 / 1;
+}
+#history-preview-info {
+    padding: 10px;
+    font-family: "Courier New", monospace;
+    font-size: 14px;
+    line-height: 1.4;
+    font-weight: bold;
+}
+#history-preview-info span {
+    color: #ffc107; /* Gold color for emphasis */
+}
+
 
 /* --- Customization Dropdown Styles --- */
 #customization-container details {
