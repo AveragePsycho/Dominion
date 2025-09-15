@@ -112,14 +112,18 @@ window.onload = function() {
     }
 
 
-    // --- 2. SOCKET.IO EVENT HANDLERS ---
-    socket.on('player-assignment', (data) => {
-        myPlayerId = data.playerId; myColor = data.color;
+    // --- 2. SOCKET.IO EVENT HANDLERS (NAMED FUNCTIONS) ---
+    function onPlayerAssignment(data) {
+        myPlayerId = data.playerId;
+        myColor = data.color;
         const playerIdDisplay = document.getElementById('player-id-display');
-        if (playerIdDisplay) { playerIdDisplay.textContent = `You are Player ${myPlayerId}`; playerIdDisplay.style.color = myColor; }
-    });
+        if (playerIdDisplay) {
+            playerIdDisplay.textContent = `You are Player ${myPlayerId}`;
+            playerIdDisplay.style.color = myColor;
+        }
+    }
 
-    socket.on('lobby-update', ({ players: playerList, settings, hostPlayerId }) => {
+    function onLobbyUpdate({ players: playerList, settings, hostPlayerId }) {
         players = playerList;
         PLAYER_COLORS = { 0: '#333333' }; 
         players.forEach(p => { PLAYER_COLORS[p.id] = p.color; });
@@ -127,9 +131,9 @@ window.onload = function() {
         isHost = myPlayerId === hostPlayerId;
         updatePlayerListView(hostPlayerId);
         updateLobbyUI(settings);
-    });
+    }
 
-    socket.on('game-state-update', (newState) => {
+    function onGameStateUpdate(newState) {
         if (!localGameState.multiverse[activeTimelineId] && Object.keys(newState.multiverse).length > 0) {
             activeTimelineId = Object.keys(newState.multiverse)[0] || 'timeline-alpha';
         }
@@ -159,8 +163,123 @@ window.onload = function() {
                 timelineListContainer.classList.add('hidden');
             }
         }
-    });
+    }
+
+    function onGameStart({ settings }) {
+        document.getElementById('game-status').innerText = "";
+        readyBtn.style.display = 'none';
+        customizationContainer.classList.add('hidden');
+        isFogOfWarEnabled = settings.fogOfWar;
+
+        if (!settings.staggeredStart) {
+            timelineControls.classList.remove('hidden');
+            timelineListContainer.classList.remove('hidden');
+        }
+    }
+
+    function onGameOver(data) {
+        const statusDiv = document.getElementById('game-status');
+        if (data.winnerId === myPlayerId) {
+            statusDiv.innerText = "You are victorious!";
+        } else {
+            statusDiv.innerText = `Game Over! Player ${data.winnerId} is the winner.`;
+        }
+        readyBtn.style.display = 'block';
+        customizationContainer.classList.remove('hidden');
+        timelineControls.classList.add('hidden');
+        timelineListContainer.classList.add('hidden');
+        isReady = false;
+        readyBtn.classList.remove('ready');
+        readyBtn.textContent = 'Ready Up';
+    }
+
+    function onGameInProgress() {
+        document.body.innerHTML = '<h1>Game in progress. Please wait for the next round.</h1>';
+    }
     
+    function onRollbackInfoResponse({ oldestAffordableStep }) {
+        const currentStep = localGameState.multiverse[activeTimelineId]?.currentState.gameStep;
+        if (!currentStep) return;
+
+        showModal({
+            title: 'Timeline Rollback',
+            message: `Select a step to roll back to. Current step: ${currentStep}. Oldest affordable step: ${oldestAffordableStep}.`,
+            showInput: true,
+            defaultValue: oldestAffordableStep
+        }).then(targetStepInput => {
+            const targetStep = parseInt(targetStepInput);
+            if (!Number.isInteger(targetStep) || targetStep < oldestAffordableStep || targetStep >= currentStep) {
+                showModal({ title: 'Error', message: 'Invalid or unaffordable step number.' });
+                return;
+            }
+            const stepsToRollback = currentStep - targetStep;
+            const cost = Math.floor(10 * Math.pow(1.05, stepsToRollback / 10));
+
+            return showModal({
+                title: 'Confirm Rollback',
+                message: `This will roll back ${stepsToRollback} steps to step ${targetStep}.`,
+                costText: `Estimated Cost: ${cost} army`,
+            }).then(() => {
+                socket.emit('player-action', { type: 'ROLLBACK', activeTimelineId: activeTimelineId, targetStep: targetStep });
+            });
+        }).catch(() => {}); // Catches cancellation of modals
+    }
+
+    function onAffordabilityInfoResponse({ actionType, maxDuration }) {
+        if (maxDuration <= 0) {
+            showModal({ title: 'Unaffordable', message: 'You do not have enough army on your General to perform this action.'});
+            return;
+        }
+        showModal({
+            title: `Set ${actionType} Duration`,
+            message: `Enter duration for ${actionType} (in steps). Maximum affordable is ${maxDuration} steps.`,
+            showInput: true,
+            defaultValue: maxDuration
+        }).then(durationInput => {
+            const duration = parseInt(durationInput);
+            if (!Number.isInteger(duration) || duration <= 0 || duration > maxDuration) {
+                showModal({ title: 'Error', message: 'Invalid or unaffordable duration.'});
+                return;
+            }
+            const costCalculator = COST_CALCULATORS[actionType];
+            if(!costCalculator) return;
+            const cost = costCalculator(duration);
+
+            return showModal({
+                title: `Confirm ${actionType}`,
+                message: `This action will last for ${duration} steps.`,
+                costText: `Cost: ${cost} army`,
+            }).then(() => {
+                const action = {
+                    type: actionType,
+                    activeTimelineId: activeTimelineId,
+                    duration: duration,
+                    cost: cost,
+                };
+                if(actionType === 'HOP') {
+                    if(selectedTile) {
+                        action.selectedTile = selectedTile;
+                    } else {
+                        showModal({ title: 'Error', message: 'You must select a tile to open a portal.'});
+                        return;
+                    }
+                }
+                socket.emit('player-action', action);
+            });
+        }).catch(() => {}); // Catches cancellation
+    }
+
+    socket.on('player-assignment', onPlayerAssignment);
+    socket.on('lobby-update', onLobbyUpdate);
+    socket.on('game-state-update', onGameStateUpdate);
+    socket.on('game-start', onGameStart);
+    socket.on('game-over', onGameOver);
+    socket.on('game-in-progress', onGameInProgress);
+    socket.on('rollback-info-response', onRollbackInfoResponse);
+    socket.on('affordability-info-response', onAffordabilityInfoResponse);
+
+
+    // --- 3. RENDERING & HELPER FUNCTIONS ---
     function updatePlayerListView(hostPlayerId) {
         const playerListElement = document.getElementById('player-list');
         if (playerListElement) {
@@ -194,52 +313,14 @@ window.onload = function() {
         forestPercent.value = settings.forestPercent;
         cityCount.value = settings.cityCount;
     }
-
-    function emitSettings() {
-        if (!isHost) return;
-        const newSettings = {
-            fogOfWar: fogToggle.checked,
-            staggeredStart: staggeredStartToggle.checked,
-            fairGenerals: fairGeneralsToggle.checked,
-            mountainPercent: mountainPercent.value,
-            forestPercent: forestPercent.value,
-            cityCount: cityCount.value
-        };
-        socket.emit('update-game-settings', newSettings);
-    }
-    allCustomizationInputs.forEach(input => input.addEventListener('change', emitSettings));
     
-    socket.on('game-start', ({ settings }) => {
-        document.getElementById('game-status').innerText = "";
-        readyBtn.style.display = 'none';
-        customizationContainer.classList.add('hidden');
-        isFogOfWarEnabled = settings.fogOfWar;
-
-        if (!settings.staggeredStart) {
-            timelineControls.classList.remove('hidden');
-            timelineListContainer.classList.remove('hidden');
-        }
-    });
-
-    socket.on('game-over', (data) => {
-        const statusDiv = document.getElementById('game-status');
-        if (data.winnerId === myPlayerId) { statusDiv.innerText = "You are victorious!"; }
-        else { statusDiv.innerText = `Game Over! Player ${data.winnerId} is the winner.`; }
-        readyBtn.style.display = 'block';
-        customizationContainer.classList.remove('hidden');
-        timelineControls.classList.add('hidden');
-        timelineListContainer.classList.add('hidden');
-        isReady = false; readyBtn.classList.remove('ready'); readyBtn.textContent = 'Ready Up';
-    });
-
-    socket.on('game-in-progress', () => { document.body.innerHTML = '<h1>Game in progress. Please wait for the next round.</h1>'; });
-
-    // ... render, renderTimelineTree and other functions are here...
+    // ... render, renderTimelineTree, etc. are complex and kept as is for brevity ...
     function getCausalityColor(tag, currentStep) { if (!tag) return '#FFFFFF'; const age = currentStep - tag.originStep; const normalizedAge = Math.min(Math.max(age, 0), 100); const r = Math.floor(139 + (255 - 139) * (normalizedAge / 100)); const g = Math.floor(0 + (182 - 0) * (normalizedAge / 100)); const b = Math.floor(0 + (193 - 0) * (normalizedAge / 100)); return `rgb(${r},${g},${b})`; }
     function render() { ctx.save(); ctx.clearRect(0, 0, canvas.width, canvas.height); ctx.translate(camera.x, camera.y); ctx.scale(camera.zoom, camera.zoom); const currentTimeline = localGameState.multiverse[activeTimelineId]; if (!currentTimeline) { ctx.restore(); ctx.fillStyle = 'white'; ctx.font = '24px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('Waiting for players to ready up...', canvas.width / 2, canvas.height / 2); renderTimelineTree(); return; } const activeGameState = currentTimeline.currentState; const TILE_SIZE = BASE_TILE_SIZE; const view = { x: -camera.x / camera.zoom, y: -camera.y / camera.zoom, width: canvas.width / camera.zoom, height: canvas.height / camera.zoom }; const startCol = Math.floor(view.x / TILE_SIZE); const endCol = Math.ceil((view.x + view.width) / TILE_SIZE); const startRow = Math.floor(view.y / TILE_SIZE); const endRow = Math.ceil((view.y + view.height) / TILE_SIZE); for (let row = startRow; row < endRow; row++) { for (let col = startCol; col < endCol; col++) { if (row < 0 || row >= localGameState.boardDimensions.rows || col < 0 || col >= localGameState.boardDimensions.cols) continue; const x = col * TILE_SIZE, y = row * TILE_SIZE; if (isFogOfWarEnabled && localGameState.visibilityGrid && !localGameState.visibilityGrid[row]?.[col]) { ctx.fillStyle = '#111111'; ctx.fillRect(x, y, TILE_SIZE, TILE_SIZE); continue; } const tile = activeGameState.board[row]?.[col]; if (!tile) continue; if(tile.type === TILE_TYPE.ERASED) { ctx.fillStyle = '#000000'; ctx.fillRect(x, y, TILE_SIZE, TILE_SIZE); continue; } ctx.fillStyle = PLAYER_COLORS[tile.ownerId] || '#FFFFFF'; if (tile.type === TILE_TYPE.MOUNTAIN) { ctx.fillStyle = '#555555'; } else if (tile.type === TILE_TYPE.FOREST) { ctx.fillStyle = '#006400'; } ctx.fillRect(x, y, TILE_SIZE - 1, TILE_SIZE - 1); const isPortal = localGameState.portals.some(p => p.fromTimelineId === activeTimelineId && p.coords.row === row && p.coords.col === col); if (isPortal) { ctx.fillStyle = '#8A2BE2'; ctx.beginPath(); ctx.arc(x + TILE_SIZE * 0.75, y + TILE_SIZE * 0.25, TILE_SIZE / 5, 0, Math.PI * 2); ctx.fill(); } if (tile.type === TILE_TYPE.GENERAL) { ctx.fillStyle = '#490c3aff'; ctx.beginPath(); ctx.arc(x + TILE_SIZE / 2, y + TILE_SIZE / 2, TILE_SIZE / 4, 0, Math.PI * 2); ctx.fill(); } else if (tile.type === TILE_TYPE.CITY) { ctx.strokeStyle = '#FFFFFF'; ctx.lineWidth = 2 / camera.zoom; ctx.strokeRect(x + 1, y + 1, TILE_SIZE - 3, TILE_SIZE - 3); } if (tile.army > 0 && tile.type !== TILE_TYPE.MOUNTAIN && camera.zoom > 0.5) { const isMyTile = tile.ownerId === myPlayerId; const isArmyVisible = (tile.type !== TILE_TYPE.FOREST) || isMyTile; if (isArmyVisible) { ctx.fillStyle = getCausalityColor(tile.causalityTag, activeGameState.gameStep); ctx.font = `bold ${TILE_SIZE / 2}px sans-serif`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(tile.army, x + TILE_SIZE / 2, y + TILE_SIZE / 2); } } } } if (currentTimeline.isUnravelling && currentTimeline.unravelCenter) { ctx.fillStyle = 'rgba(255, 0, 255, 0.2)'; ctx.beginPath(); const centerX = currentTimeline.unravelCenter.col * TILE_SIZE + TILE_SIZE / 2; const centerY = currentTimeline.unravelCenter.row * TILE_SIZE + TILE_SIZE / 2; ctx.arc(centerX, centerY, currentTimeline.unravelRadius * TILE_SIZE, 0, Math.PI * 2); ctx.fill(); } const activeTimelinesCount = Object.keys(localGameState.multiverse).filter(id => !localGameState.multiverse[id].isFrozen).length || 1; const tickDurationMs = GAME_TICK_MS * activeTimelinesCount; const segmentDuration = tickDurationMs * MOVE_TICKS; for (const move of activeGameState.moves) { const currentPos = move.path[move.pathIndex]; if (isFogOfWarEnabled && localGameState.visibilityGrid && !localGameState.visibilityGrid[currentPos.row]?.[currentPos.col]) { continue; } const segmentStart = move.path[move.pathIndex]; const segmentEnd = move.path[move.pathIndex + 1]; if(!segmentStart || !segmentEnd) continue; const timeSinceUpdate = performance.now() - lastServerUpdate; const progressInSegment = (tickDurationMs * move.progress) + timeSinceUpdate; const totalFraction = Math.min(progressInSegment / segmentDuration, 1.0); const startX = (segmentStart.col * TILE_SIZE) + (TILE_SIZE / 2); const startY = (segmentStart.row * TILE_SIZE) + (TILE_SIZE / 2); const endX = (segmentEnd.col * TILE_SIZE) + (TILE_SIZE / 2); const endY = (segmentEnd.row * TILE_SIZE) + (TILE_SIZE / 2); const currentX = startX + (endX - startX) * totalFraction; const currentY = startY + (endY - startY) * totalFraction; ctx.beginPath(); ctx.arc(currentX, currentY, TILE_SIZE / 2, 0, Math.PI * 2); ctx.fillStyle = PLAYER_COLORS[move.ownerId]; ctx.fill(); ctx.strokeStyle = '#FFFFFF'; ctx.lineWidth = 1 / camera.zoom; ctx.stroke(); if (camera.zoom > 0.5) { ctx.fillStyle = getCausalityColor(move.causalityTag, activeGameState.gameStep); ctx.font = `bold ${TILE_SIZE / 2}px sans-serif`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(move.army, currentX, currentY); } } if (inputState.isDragging && inputState.path.length > 0) { ctx.strokeStyle = '#FFFFFF'; if (inputState.isSplitMove) { ctx.setLineDash([5, 10]); } ctx.lineWidth = 2 / camera.zoom; ctx.beginPath(); const firstTile = inputState.path[0]; ctx.moveTo((firstTile.col * TILE_SIZE) + (TILE_SIZE / 2), (firstTile.row * TILE_SIZE) + (TILE_SIZE / 2)); for (let i = 1; i < inputState.path.length; i++) { const tile = inputState.path[i]; ctx.lineTo((tile.col * TILE_SIZE) + (TILE_SIZE / 2), (tile.row * TILE_SIZE) + (TILE_SIZE / 2)); } if (inputState.endTile) { ctx.lineTo((inputState.endTile.col * TILE_SIZE) + (TILE_SIZE / 2), (inputState.endTile.row * TILE_SIZE) + (TILE_SIZE / 2)); } ctx.stroke(); ctx.setLineDash([]); } if (selectedTile) { const x = selectedTile.col * TILE_SIZE, y = selectedTile.row * TILE_SIZE; ctx.strokeStyle = '#FFFF00'; ctx.lineWidth = 3 / camera.zoom; ctx.strokeRect(x, y, TILE_SIZE, TILE_SIZE); } ctx.restore(); renderTimelineTree(); }
     function renderTimelineTree() { const PADDING = 20; const X_SPACING = 50; const Y_SCALE = 0.5; treeCtx.clearRect(0, 0, treeCanvas.width, treeCanvas.height); treeCtx.fillStyle = '#FFFFFF'; treeCtx.strokeStyle = '#FFFFFF'; treeCtx.font = '12px sans-serif'; if (!localGameState.multiverse || Object.keys(localGameState.multiverse).length === 0) return; let maxStep = 0; for (const id in localGameState.multiverse) { if (localGameState.multiverse[id].currentState.gameStep > maxStep) { maxStep = localGameState.multiverse[id].currentState.gameStep; } } maxStep = Math.max(maxStep, 1); const timelinePositions = {}; const timelineLevels = {}; function assignLevels(timelineId, level) { if(timelineLevels[timelineId] !== undefined) return; timelineLevels[timelineId] = level; Object.values(localGameState.multiverse).forEach(child => { if (child.parentId === timelineId) { assignLevels(child.id, level + 1); } }); } assignLevels('timeline-alpha', 0); Object.keys(timelineLevels).forEach(id => { const level = timelineLevels[id]; timelinePositions[id] = { x: PADDING + level * X_SPACING }; }); for (const id in localGameState.multiverse) { const timeline = localGameState.multiverse[id]; const pos = timelinePositions[id]; if (!pos) continue; const startY = PADDING + timeline.splitStep * Y_SCALE; const endY = PADDING + timeline.currentState.gameStep * Y_SCALE; treeCtx.beginPath(); treeCtx.moveTo(pos.x, startY); treeCtx.lineTo(pos.x, endY); treeCtx.lineWidth = timeline.id === activeTimelineId ? 4 : 2; treeCtx.strokeStyle = timeline.isUnravelling ? '#FF00FF' : '#FFFFFF'; treeCtx.stroke(); if (timeline.parentId && timelinePositions[timeline.parentId]) { const parentPos = timelinePositions[timeline.parentId]; treeCtx.beginPath(); treeCtx.moveTo(parentPos.x, startY); treeCtx.lineTo(pos.x, startY); treeCtx.lineWidth = 1; treeCtx.strokeStyle = '#888888'; treeCtx.stroke(); } treeCtx.beginPath(); treeCtx.arc(pos.x, endY, 5, 0, Math.PI * 2); treeCtx.fillStyle = timeline.id === activeTimelineId ? '#007bff' : '#FFFFFF'; treeCtx.fill(); treeCtx.fillText(id.split('-')[1], pos.x + 10, endY + 4); } }
     
-    // --- 4. INPUT EVENT LISTENERS ---
+
+    // --- 4. INPUT EVENT LISTENERS (NAMED FUNCTIONS) ---
     function getTileFromMouseEvent(event) {
         const rect = canvas.getBoundingClientRect();
         const x = (event.clientX - rect.left - camera.x) / camera.zoom;
@@ -250,7 +331,7 @@ window.onload = function() {
         return null;
     }
 
-    canvas.addEventListener('mousedown', (event) => {
+    function handleMouseDown(event) {
         const tileCoords = getTileFromMouseEvent(event);
         if (!tileCoords) return;
 
@@ -260,15 +341,15 @@ window.onload = function() {
             inputState.path = [tileCoords];
             inputState.endTile = tileCoords;
             inputState.isSplitMove = (event.button === 2); // Set split flag on right click
-        } else if (event.button === 1) {
+        } else if (event.button === 1) { // Middle mouse click
             event.preventDefault();
             panningState.isPanning = true; 
             panningState.lastMouseX = event.clientX; 
             panningState.lastMouseY = event.clientY;
         }
-    });
+    }
 
-    canvas.addEventListener('mousemove', (event) => {
+    function handleMouseMove(event) {
         if (inputState.isDragging) {
             const currentTileCoords = getTileFromMouseEvent(event);
             if (currentTileCoords) {
@@ -287,13 +368,14 @@ window.onload = function() {
         } else if (panningState.isPanning) {
             const dx = event.clientX - panningState.lastMouseX;
             const dy = event.clientY - panningState.lastMouseY;
-            camera.x += dx; camera.y += dy;
+            camera.x += dx;
+            camera.y += dy;
             panningState.lastMouseX = event.clientX; 
             panningState.lastMouseY = event.clientY;
         }
-    });
+    }
 
-    canvas.addEventListener('mouseup', (event) => {
+    function handleMouseUp(event) {
         if (event.button === 0 || event.button === 2) {
             if (inputState.isDragging) {
                 if (inputState.path.length > 1) {
@@ -316,21 +398,147 @@ window.onload = function() {
         } else if (event.button === 1) {
             panningState.isPanning = false;
         }
-    });
+    }
+
+    function handleContextMenu(event) {
+        event.preventDefault();
+    }
+
+    function handleWheel(event) {
+        event.preventDefault();
+        const rect = canvas.getBoundingClientRect();
+        const mouseX = event.clientX - rect.left;
+        const mouseY = event.clientY - rect.top;
+
+        const worldX = (mouseX - camera.x) / camera.zoom;
+        const worldY = (mouseY - camera.y) / camera.zoom;
+
+        const zoomFactor = event.deltaY > 0 ? 0.9 : 1.1;
+        const newZoom = Math.max(camera.minZoom, Math.min(camera.maxZoom, camera.zoom * zoomFactor));
+
+        camera.x = mouseX - worldX * newZoom;
+        camera.y = mouseY - worldY * newZoom;
+        camera.zoom = newZoom;
+    }
+
+    function handleReadyButtonClick() {
+        isReady = !isReady;
+        socket.emit('player-ready', isReady);
+        if (isReady) {
+            readyBtn.textContent = 'Unready';
+            readyBtn.classList.add('ready');
+        } else {
+            readyBtn.textContent = 'Ready Up';
+            readyBtn.classList.remove('ready');
+        }
+    }
+
+    function handleKeyDown(event) {
+        if (!modalOverlay.classList.contains('hidden')) return;
+
+        // Timeline switching with Q and E
+        const timelineIds = Object.keys(localGameState.multiverse);
+        if (timelineIds.length > 1) {
+            const currentIndex = timelineIds.indexOf(activeTimelineId);
+            let newIndex = currentIndex;
+            if (event.key === 'e') {
+                newIndex = (currentIndex + 1) % timelineIds.length;
+            } else if (event.key === 'q') {
+                newIndex = (currentIndex - 1 + timelineIds.length) % timelineIds.length;
+            }
+            if (newIndex !== currentIndex) {
+                activeTimelineId = timelineIds[newIndex];
+                updatePlayerListView();
+            }
+        }
+
+        // WASD movement from a selected tile
+        if (selectedTile) {
+            let dest = null;
+            switch (event.key) {
+                case 'w': case 'ArrowUp':    dest = { row: selectedTile.row - 1, col: selectedTile.col }; event.preventDefault(); break;
+                case 'a': case 'ArrowLeft':  dest = { row: selectedTile.row, col: selectedTile.col - 1 }; event.preventDefault(); break;
+                case 's': case 'ArrowDown':  dest = { row: selectedTile.row + 1, col: selectedTile.col }; event.preventDefault(); break;
+                case 'd': case 'ArrowRight': dest = { row: selectedTile.row, col: selectedTile.col + 1 }; event.preventDefault(); break;
+            }
+            if (dest) {
+                if (dest.row >= 0 && dest.row < localGameState.boardDimensions.rows && dest.col >= 0 && dest.col < localGameState.boardDimensions.cols) {
+                    const currentTimeline = localGameState.multiverse[activeTimelineId];
+                    if (currentTimeline) {
+                        const targetTile = currentTimeline.currentState.board[dest.row]?.[dest.col];
+                        if (targetTile && targetTile.type !== TILE_TYPE.MOUNTAIN) {
+                            const path = [selectedTile, dest];
+                            socket.emit('player-action', { type: 'MOVE', path: path, activeTimelineId: activeTimelineId });
+                            selectedTile = dest;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    function handleTimelineTreeClick() {
+        const timelineIds = Object.keys(localGameState.multiverse);
+        const currentIndex = timelineIds.indexOf(activeTimelineId);
+        const newIndex = (currentIndex + 1) % timelineIds.length;
+        activeTimelineId = timelineIds[newIndex];
+        updatePlayerListView();
+    }
     
-    canvas.addEventListener('contextmenu', e => e.preventDefault());
-    canvas.addEventListener('wheel', (event) => { event.preventDefault(); const rect = canvas.getBoundingClientRect(); const mouseX = event.clientX - rect.left; const mouseY = event.clientY - rect.top; const worldX = (mouseX - camera.x) / camera.zoom; const worldY = (mouseY - camera.y) / camera.zoom; const zoomFactor = event.deltaY > 0 ? 0.9 : 1.1; const newZoom = Math.max(camera.minZoom, Math.min(camera.maxZoom, camera.zoom * zoomFactor)); camera.x = mouseX - worldX * newZoom; camera.y = mouseY - worldY * newZoom; camera.zoom = newZoom; }, { passive: false });
-    readyBtn.addEventListener('click', () => { isReady = !isReady; socket.emit('player-ready', isReady); if (isReady) { readyBtn.textContent = 'Unready'; readyBtn.classList.add('ready'); } else { readyBtn.textContent = 'Ready Up'; readyBtn.classList.remove('ready'); } });
-    window.addEventListener('keydown', (event) => { if (!modalOverlay.classList.contains('hidden')) return; const timelineIds = Object.keys(localGameState.multiverse); if (timelineIds.length > 1) { const currentIndex = timelineIds.indexOf(activeTimelineId); let newIndex = currentIndex; if (event.key === 'e') { newIndex = (currentIndex + 1) % timelineIds.length; } else if (event.key === 'q') { newIndex = (currentIndex - 1 + timelineIds.length) % timelineIds.length; } if (newIndex !== currentIndex) { activeTimelineId = timelineIds[newIndex]; updatePlayerListView(); } } if (selectedTile) { let dest = null; switch (event.key) { case 'w': case 'ArrowUp': dest = { row: selectedTile.row - 1, col: selectedTile.col }; event.preventDefault(); break; case 'a': case 'ArrowLeft': dest = { row: selectedTile.row, col: selectedTile.col - 1 }; event.preventDefault(); break; case 's': case 'ArrowDown': dest = { row: selectedTile.row + 1, col: selectedTile.col }; event.preventDefault(); break; case 'd': case 'ArrowRight': dest = { row: selectedTile.row, col: selectedTile.col + 1 }; event.preventDefault(); break; } if (dest) { if (dest.row >= 0 && dest.row < localGameState.boardDimensions.rows && dest.col >= 0 && dest.col < localGameState.boardDimensions.cols) { const currentTimeline = localGameState.multiverse[activeTimelineId]; if (currentTimeline) { const targetTile = currentTimeline.currentState.board[dest.row]?.[dest.col]; if (targetTile && targetTile.type !== TILE_TYPE.MOUNTAIN) { const path = [selectedTile, dest]; socket.emit('player-action', { type: 'MOVE', path: path, activeTimelineId: activeTimelineId }); selectedTile = dest; } } } } } });
-    document.getElementById('split-timeline-btn').addEventListener('click', () => { socket.emit('player-action', { type: 'SPLIT', activeTimelineId: activeTimelineId }); });
-    document.getElementById('rollback-timeline-btn').addEventListener('click', () => { const currentStep = localGameState.multiverse[activeTimelineId]?.currentState.gameStep; if (!currentStep) return; socket.emit('get-rollback-info', { activeTimelineId }); });
-    socket.on('rollback-info-response', ({ oldestAffordableStep }) => { const currentStep = localGameState.multiverse[activeTimelineId]?.currentState.gameStep; if (!currentStep) return; showModal({ title: 'Timeline Rollback', message: `Select a step to roll back to. Current step: ${currentStep}. Oldest affordable step: ${oldestAffordableStep}.`, showInput: true, defaultValue: oldestAffordableStep }).then(targetStepInput => { const targetStep = parseInt(targetStepInput); if (!Number.isInteger(targetStep) || targetStep < oldestAffordableStep || targetStep >= currentStep) { showModal({ title: 'Error', message: 'Invalid or unaffordable step number.' }); return; } const stepsToRollback = currentStep - targetStep; const cost = Math.floor(10 * Math.pow(1.05, stepsToRollback / 10)); return showModal({ title: 'Confirm Rollback', message: `This will roll back ${stepsToRollback} steps to step ${targetStep}.`, costText: `Estimated Cost: ${cost} army`, }).then(() => { socket.emit('player-action', { type: 'ROLLBACK', activeTimelineId: activeTimelineId, targetStep: targetStep }); }); }).catch(() => {}); });
-    socket.on('affordability-info-response', ({ actionType, maxDuration }) => { if (maxDuration <= 0) { showModal({ title: 'Unaffordable', message: 'You do not have enough army on your General to perform this action.'}); return; } showModal({ title: `Set ${actionType} Duration`, message: `Enter duration for ${actionType} (in steps). Maximum affordable is ${maxDuration} steps.`, showInput: true, defaultValue: maxDuration }).then(durationInput => { const duration = parseInt(durationInput); if (!Number.isInteger(duration) || duration <= 0 || duration > maxDuration) { showModal({ title: 'Error', message: 'Invalid or unaffordable duration.'}); return; } const costCalculator = COST_CALCULATORS[actionType]; if(!costCalculator) return; const cost = costCalculator(duration); return showModal({ title: `Confirm ${actionType}`, message: `This action will last for ${duration} steps.`, costText: `Cost: ${cost} army`, }).then(() => { const action = { type: actionType, activeTimelineId: activeTimelineId, duration: duration, cost: cost, }; if(actionType === 'HOP') { if(selectedTile) { action.selectedTile = selectedTile; } else { showModal({ title: 'Error', message: 'You must select a tile to open a portal.'}); return; } } socket.emit('player-action', action); }); }).catch(() => {}); });
-    document.getElementById('anchor-timeline-btn').addEventListener('click', () => { socket.emit('player-action', { type: 'ANCHOR', activeTimelineId: activeTimelineId }); });
-    document.getElementById('freeze-timeline-btn').addEventListener('click', () => { socket.emit('get-affordability-info', { actionType: 'FREEZE', activeTimelineId: activeTimelineId }); });
-    document.getElementById('overclock-timeline-btn').addEventListener('click', () => { socket.emit('get-affordability-info', { actionType: 'OVERCLOCK', activeTimelineId: activeTimelineId }); });
-    document.getElementById('hop-timeline-btn').addEventListener('click', () => { if (!selectedTile) { showModal({ title: 'Error', message: 'You must select a tile before opening a portal.'}); return; } socket.emit('get-affordability-info', { actionType: 'HOP', activeTimelineId: activeTimelineId }); });
-    treeCanvas.addEventListener('click', (event) => { const timelineIds = Object.keys(localGameState.multiverse); const currentIndex = timelineIds.indexOf(activeTimelineId); const newIndex = (currentIndex + 1) % timelineIds.length; activeTimelineId = timelineIds[newIndex]; updatePlayerListView(); });
-    function animationLoop() { render(); requestAnimationFrame(animationLoop); }
+    function emitSettingsChange() {
+        if (!isHost) return;
+        const newSettings = {
+            fogOfWar: fogToggle.checked,
+            staggeredStart: staggeredStartToggle.checked,
+            fairGenerals: fairGeneralsToggle.checked,
+            mountainPercent: mountainPercent.value,
+            forestPercent: forestPercent.value,
+            cityCount: cityCount.value
+        };
+        socket.emit('update-game-settings', newSettings);
+    }
+
+    // --- Timeline Control Button Handlers ---
+    function handleSplitTimelineClick() { socket.emit('player-action', { type: 'SPLIT', activeTimelineId: activeTimelineId }); }
+    function handleRollbackTimelineClick() {
+        const currentStep = localGameState.multiverse[activeTimelineId]?.currentState.gameStep;
+        if (!currentStep) return;
+        socket.emit('get-rollback-info', { activeTimelineId });
+    }
+    function handleAnchorTimelineClick() { socket.emit('player-action', { type: 'ANCHOR', activeTimelineId: activeTimelineId }); }
+    function handleFreezeTimelineClick() { socket.emit('get-affordability-info', { actionType: 'FREEZE', activeTimelineId: activeTimelineId }); }
+    function handleOverclockTimelineClick() { socket.emit('get-affordability-info', { actionType: 'OVERCLOCK', activeTimelineId: activeTimelineId }); }
+    function handleHopTimelineClick() {
+        if (!selectedTile) {
+            showModal({ title: 'Error', message: 'You must select a tile before opening a portal.'});
+            return;
+        }
+        socket.emit('get-affordability-info', { actionType: 'HOP', activeTimelineId: activeTimelineId });
+    }
+
+
+    // --- Assigning Handlers to Elements ---
+    canvas.addEventListener('mousedown', handleMouseDown);
+    canvas.addEventListener('mousemove', handleMouseMove);
+    canvas.addEventListener('mouseup', handleMouseUp);
+    canvas.addEventListener('contextmenu', handleContextMenu);
+    canvas.addEventListener('wheel', handleWheel, { passive: false });
+    readyBtn.addEventListener('click', handleReadyButtonClick);
+    window.addEventListener('keydown', handleKeyDown);
+    treeCanvas.addEventListener('click', handleTimelineTreeClick);
+    allCustomizationInputs.forEach(input => input.addEventListener('change', emitSettingsChange));
+
+    document.getElementById('split-timeline-btn').addEventListener('click', handleSplitTimelineClick);
+    document.getElementById('rollback-timeline-btn').addEventListener('click', handleRollbackTimelineClick);
+    document.getElementById('anchor-timeline-btn').addEventListener('click', handleAnchorTimelineClick);
+    document.getElementById('freeze-timeline-btn').addEventListener('click', handleFreezeTimelineClick);
+    document.getElementById('overclock-timeline-btn').addEventListener('click', handleOverclockTimelineClick);
+    document.getElementById('hop-timeline-btn').addEventListener('click', handleHopTimelineClick);
+    
+    // --- START THE RENDER LOOP ---
+    function animationLoop() {
+        render();
+        requestAnimationFrame(animationLoop);
+    }
     requestAnimationFrame(animationLoop);
 };
