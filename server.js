@@ -11,7 +11,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 // --- Global Game Constants ---
 let BOARD_COLS = 40, BOARD_ROWS = 30;
-const GAME_TICK_MS = 125, MOVE_TICKS = 2, KEYFRAME_INTERVAL = 60;
+const GAME_TICK_MS = 125,MOVE_TICKS = 2, KEYFRAME_INTERVAL = 60;
 const MAX_PLAYERS = 64;
 const TIME_ACTION_COST = { ANCHOR: 200, SPLIT_BASE: 250 };
 const TILE_TYPE = { EMPTY: 0, MOUNTAIN: 1, CITY: 2, GENERAL: 3, FOREST: 4, ERASED: 5 };
@@ -68,8 +68,8 @@ function createNewGame() {
         gameState: 'LOBBY',
         hostId: null,
         timelineNameCounter: 1,
-        visibility: {}, // Centralized visibility store
-        playerStats: {}, // Centralized player stats store
+        visibility: {},
+        playerStats: {},
         settings: {
             fogOfWar: true,
             mountainPercent: 10,
@@ -83,8 +83,6 @@ function createNewGame() {
 
 /**
  * Calculates the optimal board dimensions based on the number of players.
- * The map area scales up to ensure fair spacing and prevent overcrowding,
- * maintaining a 16:9 aspect ratio.
  * @param {number} playerCount - The number of players in the game.
  * @returns {{cols: number, rows: number}} An object containing the new column and row counts.
  */
@@ -133,7 +131,6 @@ function generateSpawnPoints(boardDimensions, playerCount) {
 
 /**
  * Sets up the initial state of the game board and timelines when a match starts.
- * This includes generating the map, placing mountains, forests, cities, and player Generals.
  * @param {object} game - The global game object to be initialized.
  */
 function initializeGame(game) {
@@ -206,7 +203,6 @@ function initializeGame(game) {
 
 /**
  * Applies the effect of a player's action to the game state.
- * This handles deducting costs from Generals for time powers and creating new army movements.
  * @param {object} gameState - The game state to modify.
  * @param {object} action - The action object containing type, player, cost, etc.
  */
@@ -240,7 +236,7 @@ function applyAction(gameState, action) {
 }
 
 /**
- * Validates and processes a player's move action, then adds it to the timeline's action history.
+ * Validates and processes a player's move action.
  * @param {number} playerId - The ID of the player making the move.
  * @param {object} action - The move action object from the client.
  * @param {string} activeTimelineId - The ID of the timeline where the move occurs.
@@ -250,7 +246,7 @@ function processMove(playerId, action, activeTimelineId, game) {
     const timeline = game.multiverse[activeTimelineId];
     if (!timeline) return;
 
-    const { path, isSplit } = action;
+    const { path } = action;
     if (!path || path.length < 2) return;
 
     const gameState = timeline.currentState;
@@ -259,7 +255,6 @@ function processMove(playerId, action, activeTimelineId, game) {
     const startTile = board[path[0].row]?.[path[0].col];
     if (!startTile || startTile.ownerId !== playerId || startTile.army <= 1) return;
 
-    // Validate the path to ensure it's contiguous and doesn't cross mountains.
     for (let i = 0; i < path.length; i++) {
         const { row, col } = path[i];
         const tile = board[row]?.[col];
@@ -269,121 +264,106 @@ function processMove(playerId, action, activeTimelineId, game) {
             if (Math.abs(col - prev.col) + Math.abs(row - prev.row) !== 1) return;
         }
     }
-
-    // Replace any existing move from the player to prevent multiple armies in motion.
-    const existingMoveIndex = gameState.moves.findIndex(move => move.ownerId === playerId);
-    if (existingMoveIndex !== -1) {
-        const oldMove = gameState.moves[existingMoveIndex];
-        const currentPos = oldMove.path[oldMove.pathIndex];
-        board[currentPos.row][currentPos.col].army += oldMove.army;
-        gameState.moves.splice(existingMoveIndex, 1);
-    }
     
-    const actionForHistory = { type: 'MOVE', playerId, path, isSplit };
+    const actionForHistory = { type: 'MOVE', playerId, path, isSplit: action.isSplit };
     timeline.actions.push({ step: gameState.gameStep, action: actionForHistory });
     applyAction(gameState, actionForHistory);
 }
 
 /**
- * Processes a single discrete time step (a "tick") for a given timeline.
+ * Processes a single discrete time step for a given timeline.
  * @param {object} currentGameState - The state of the timeline to be updated.
  * @param {string} timelineId - The ID of the timeline being processed.
  * @param {object} game - The global game object.
  */
 function runSingleTickLogic(currentGameState, timelineId, game) {
-    // Process all active army movements. Iterate backwards to safely remove moves.
     for (let i = currentGameState.moves.length - 1; i >= 0; i--) {
         const move = currentGameState.moves[i];
         move.progress++;
 
-        // When a move segment is complete, process arrival at the next tile.
         if (move.progress >= MOVE_TICKS) {
             move.progress = 0;
-            const leavingPos = move.path[move.pathIndex];
-            const isFinalSegment = move.pathIndex >= move.path.length - 2;
-            const arrivingPos = move.path[move.pathIndex + 1];
+            const nextPos = move.path[move.pathIndex + 1];
 
-            if (!arrivingPos) {
+            if (!nextPos) {
                 currentGameState.moves.splice(i, 1);
                 continue;
             }
 
-            const leavingTile = currentGameState.board[leavingPos.row][leavingPos.col];
-            const arrivingTile = currentGameState.board[arrivingPos.row][arrivingPos.col];
-
-            // Snowball: pick up armies from friendly tiles (but not the starting tile).
-            if (leavingTile.ownerId === move.ownerId && move.pathIndex > 0) {
-                move.army += leavingTile.army - 1;
-                leavingTile.army = 1;
-            }
-
-            const propagateTag = () => { if (move.causalityTag) { arrivingTile.causalityTag = move.causalityTag; } };
-
-            // Combat logic:
-            if (arrivingTile.ownerId !== move.ownerId) {
-                if (move.army > arrivingTile.army) { // Attack successful
-                    move.army -= arrivingTile.army;
-                    if (arrivingTile.type === TILE_TYPE.GENERAL) { handlePlayerDefeat(move.ownerId, arrivingTile.ownerId, currentGameState); }
-                    arrivingTile.ownerId = move.ownerId;
-                    
-                    if (isFinalSegment) { arrivingTile.army = move.army; } // Drop off all army on last tile
-                    else { // Continue moving
-                        if (move.army > 1) { arrivingTile.army = 1; move.army -= 1; }
-                        else { arrivingTile.army = move.army; currentGameState.moves.splice(i, 1); }
+            const portal = game.portals.find(p => p.fromTimelineId === timelineId && p.coords.row === nextPos.row && p.coords.col === nextPos.col);
+            if (portal) {
+                const toTimeline = game.multiverse[portal.toTimelineId];
+                if (toTimeline) {
+                    const exitTilePos = findValidAdjacentTile(portal.coords, toTimeline.currentState);
+                    if (exitTilePos) {
+                        const causalityTag = { originTimelineId: timelineId, originStep: currentGameState.gameStep };
+                        toTimeline.currentState.moves.push({
+                            ownerId: move.ownerId,
+                            army: move.army,
+                            path: [portal.coords, exitTilePos],
+                            pathIndex: 0,
+                            progress: 0,
+                            causalityTag
+                        });
+                        currentGameState.moves.splice(i, 1);
+                        continue; 
                     }
-                    propagateTag();
-                } else { // Attack failed
-                    arrivingTile.army -= move.army;
+                }
+            }
+            
+            const isFinalMove = move.pathIndex >= move.path.length - 2;
+            const nextTile = currentGameState.board[nextPos.row][nextPos.col];
+
+            if (nextTile.ownerId !== move.ownerId) { // Attack
+                if (move.army > nextTile.army) {
+                    if(nextTile.type === TILE_TYPE.GENERAL) handlePlayerDefeat(move.ownerId, nextTile.ownerId, currentGameState);
+                    
+                    nextTile.ownerId = move.ownerId;
+                    const armyAfterCapture = move.army - nextTile.army;
+
+                    if (isFinalMove) {
+                        nextTile.army = armyAfterCapture;
+                    } else {
+                        nextTile.army = 1;
+                        move.army = armyAfterCapture - 1;
+                    }
+                    nextTile.causalityTag = move.causalityTag;
+
+                    if (!isFinalMove && move.army <= 0) {
+                        currentGameState.moves.splice(i, 1);
+                    }
+                } else {
+                    nextTile.army -= move.army;
                     currentGameState.moves.splice(i, 1);
                 }
-            } else { // Moving into a friendly tile
-                if (isFinalSegment) { arrivingTile.army += move.army; propagateTag(); }
-                else { move.army += arrivingTile.army - 1; arrivingTile.army = 1; propagateTag(); }
+            } else { // Reinforce or Snowball
+                if (isFinalMove) {
+                    nextTile.army += move.army;
+                } else {
+                    move.army += nextTile.army - 1;
+                    nextTile.army = 1;
+                }
             }
 
-            if (isFinalSegment) {
-                // Check if the destination is a portal
-                let moveConsumedByPortal = false;
-                const portal = game.portals.find(p => p.fromTimelineId === timelineId && p.coords.row === arrivingPos.row && p.coords.col === arrivingPos.col);
-                if (portal) {
-                    const toTimeline = game.multiverse[portal.toTimelineId];
-                    if (toTimeline) {
-                        const exitTilePos = findValidAdjacentTile(portal.coords, toTimeline.currentState);
-                        if (exitTilePos) { // Create a new move in the destination timeline
-                            const newPath = [portal.coords, exitTilePos];
-                            const causalityTag = { originTimelineId: timelineId, originStep: currentGameState.gameStep };
-                            const newMove = { ownerId: move.ownerId, army: move.army, path: newPath, pathIndex: 0, progress: 0, causalityTag };
-                            toTimeline.currentState.moves.push(newMove);
-                            moveConsumedByPortal = true;
-                        } else {
-                            arrivingTile.army += move.army; // No valid exit, reinforce instead
-                        }
-                    }
-                }
-                
-                if (moveConsumedByPortal) {
-                    arrivingTile.army -= move.army; // Army went through portal, don't leave it behind
-                }
-                
-                currentGameState.moves.splice(i, 1); // End of path
-            } else {
-                if (currentGameState.moves.includes(move)) {
-                    move.pathIndex++; // Advance to next segment of the path
+            if (currentGameState.moves.includes(move)) {
+                if (isFinalMove) {
+                    currentGameState.moves.splice(i, 1);
+                } else {
+                    move.pathIndex++;
                 }
             }
         }
     }
     
-    // Increment game step and handle passive army generation.
     currentGameState.gameStep++;
     for (let row = 0; row < BOARD_ROWS; row++) {
         for (let col = 0; col < BOARD_COLS; col++) {
             const tile = currentGameState.board[row][col];
             if (tile.ownerId !== 0) {
-                if (tile.type === TILE_TYPE.GENERAL || tile.type === TILE_TYPE.CITY) {
-                    if (currentGameState.gameStep % 4 === 0) tile.army++; // Faster generation for special tiles
-                } else if (tile.type === TILE_TYPE.EMPTY || tile.type === TILE_TYPE.FOREST) {
-                    if (currentGameState.gameStep % 20 === 0) tile.army++; // Slower generation for standard tiles
+                if ((tile.type === TILE_TYPE.GENERAL || tile.type === TILE_TYPE.CITY) && currentGameState.gameStep % 4 === 0) {
+                    tile.army++;
+                } else if ((tile.type === TILE_TYPE.EMPTY || tile.type === TILE_TYPE.FOREST) && currentGameState.gameStep % 20 === 0) {
+                    tile.army++;
                 }
             }
         }
@@ -436,7 +416,7 @@ function splitTimeline(playerId, activeTimelineId, game) {
 }
 
 /**
- * Finds a valid, non-mountain tile adjacent to the given coordinates. Used for portal exits.
+ * Finds a valid, non-mountain tile adjacent to the given coordinates.
  * @param {{row: number, col: number}} coords - The central coordinates.
  * @param {object} currentGameState - The game state to check for valid tiles.
  * @returns {{row: number, col: number}|null} The coordinates of a valid tile, or null.
@@ -496,25 +476,23 @@ function calculatePlayerStats(game) {
 }
 
 /**
- * The main game loop function. It checks for win conditions, advances all timelines,
- * handles timed events like portals, and manages paradoxes.
+ * The main game loop function.
  * @param {object} game - The global game object.
  */
 function gameLoop(game) {
     const activePlayers = new Set();
-    for (const timelineId in game.multiverse) {
-        const timeline = game.multiverse[timelineId];
-        if (timeline.isUnravelling) continue;
-        const currentGameState = timeline.currentState;
-        for (let row = 0; row < BOARD_ROWS; row++) {
-            for (let col = 0; col < BOARD_COLS; col++) {
-                const tile = currentGameState.board[row][col];
+    const firstTimelineState = game.multiverse['timeline-alpha']?.currentState;
+    if (firstTimelineState) {
+        for (let r = 0; r < BOARD_ROWS; r++) {
+            for (let c = 0; c < BOARD_COLS; c++) {
+                const tile = firstTimelineState.board[r][c];
                 if (tile.type === TILE_TYPE.GENERAL && tile.ownerId !== 0) {
                     activePlayers.add(tile.ownerId);
                 }
             }
         }
     }
+
 
     if (activePlayers.size <= 1 && game.playerCount > 1 && game.gameState === 'RUNNING') {
         const winnerId = activePlayers.values().next().value || "No one";
@@ -567,7 +545,7 @@ function gameLoop(game) {
 }
 
 /**
- * Advances a single timeline by one or more ticks based on its state (frozen, overclocked, etc.).
+ * Advances a single timeline by one tick.
  * @param {object} timeline - The timeline object to update.
  * @param {string} timelineId - The ID of the timeline.
  * @param {object} game - The global game object.
@@ -592,11 +570,10 @@ function updateTimeline(timeline, timelineId, game) {
 }
 
 /**
- * Manages paradoxes by checking for causality violations and handling timeline unravelling.
+ * Manages paradoxes by checking for causality violations.
  * @param {object} game - The global game object.
  */
 function paradoxHandler(game) {
-    // Handle the expansion of unravelling timelines
     for (const timelineId in game.multiverse) {
         const timeline = game.multiverse[timelineId];
         if (timeline.isUnravelling) {
@@ -619,10 +596,17 @@ function paradoxHandler(game) {
             if (!tilesRemaining) {
                 delete game.multiverse[timelineId];
             }
+        } else if (timeline.parentId) { // Check for timeline existence paradox
+            const parent = game.multiverse[timeline.parentId];
+            if (!parent || parent.currentState.gameStep < timeline.splitStep) {
+                timeline.isUnravelling = true;
+                const generalInfo = findGeneral(Object.values(game.players)[0]?.id, timeline.currentState) || { row: Math.floor(BOARD_ROWS/2), col: Math.floor(BOARD_COLS/2)};
+                timeline.unravelCenter = { row: generalInfo.row, col: generalInfo.col };
+                timeline.unravelRadius = 0;
+            }
         }
     }
 
-    // Check for causality violations from portals
     for (const timelineId in game.multiverse) {
         const timeline = game.multiverse[timelineId];
         const currentGameState = timeline.currentState;
@@ -707,7 +691,34 @@ function overclockTimeline(playerId, activeTimelineId, game, duration, cost) {
  * @param {number} targetStep - The game step to revert to.
  * @param {object} game - The global game object.
  */
-function rollbackTimeline(playerId, activeTimelineId, targetStep, game) { /* ... implementation needed ... */ }
+function rollbackTimeline(playerId, activeTimelineId, targetStep, game) {
+    const timeline = game.multiverse[activeTimelineId];
+    if (!timeline || targetStep < timeline.anchorStep || targetStep >= timeline.currentState.gameStep) return;
+
+    const stepsToRollback = timeline.currentState.gameStep - targetStep;
+    const cost = Math.floor(10 * Math.pow(1.05, stepsToRollback / 10));
+    
+    const lastKeyframe = [...timeline.keyframes].reverse().find(kf => kf.step <= targetStep);
+    if (!lastKeyframe) return;
+
+    let tempState = JSON.parse(JSON.stringify(lastKeyframe.gameState));
+    const actionsToReplay = timeline.actions.filter(a => a.step > lastKeyframe.step && a.step <= targetStep);
+    
+    for (let s = lastKeyframe.step; s < targetStep; s++) {
+        for (const actionRecord of actionsToReplay) {
+            if (actionRecord.step === s) applyAction(tempState, actionRecord.action);
+        }
+        runSingleTickLogic(tempState, activeTimelineId, game);
+    }
+    
+    const generalInPast = findGeneral(playerId, tempState);
+    if (!generalInPast || generalInPast.tile.army < cost) return;
+    
+    generalInPast.tile.army -= cost;
+    timeline.currentState = tempState;
+    timeline.actions = timeline.actions.filter(a => a.step < targetStep);
+}
+
 
 /**
  * Sets a "save point" in a timeline.
@@ -715,7 +726,19 @@ function rollbackTimeline(playerId, activeTimelineId, targetStep, game) { /* ...
  * @param {string} activeTimelineId - The ID of the timeline to anchor.
  * @param {object} game - The global game object.
  */
-function anchorTimeline(playerId, activeTimelineId, game) { /* ... implementation needed ... */ }
+function anchorTimeline(playerId, activeTimelineId, game) {
+    const timeline = game.multiverse[activeTimelineId];
+    if (!timeline) return;
+
+    const generalInfo = findGeneral(playerId, timeline.currentState);
+    if (!generalInfo || generalInfo.tile.army < TIME_ACTION_COST.ANCHOR) return;
+
+    const action = { type: 'ANCHOR', playerId, cost: TIME_ACTION_COST.ANCHOR };
+    timeline.actions.push({ step: timeline.currentState.gameStep, action });
+    applyAction(timeline.currentState, action);
+
+    timeline.anchorStep = timeline.currentState.gameStep;
+}
 
 /**
  * Creates a pair of linked portals between two timelines.
@@ -726,7 +749,37 @@ function anchorTimeline(playerId, activeTimelineId, game) { /* ... implementatio
  * @param {number} duration - The duration the portal will last.
  * @param {number} cost - The army cost of the portal.
  */
-function openPortal(playerId, activeTimelineId, selectedTile, game, duration, cost) { /* ... implementation needed ... */ }
+function openPortal(playerId, activeTimelineId, selectedTile, game, duration, cost) {
+    const timeline = game.multiverse[activeTimelineId];
+    if (!timeline) return;
+
+    const generalInfo = findGeneral(playerId, timeline.currentState);
+    if (!generalInfo || generalInfo.tile.army < cost) return;
+
+    const otherTimelineIds = Object.keys(game.multiverse).filter(id => id !== activeTimelineId);
+    if (otherTimelineIds.length === 0) return;
+    const toTimelineId = otherTimelineIds[Math.floor(Math.random() * otherTimelineIds.length)];
+
+    const action = { type: 'HOP', playerId, cost, duration };
+    timeline.actions.push({ step: timeline.currentState.gameStep, action });
+    applyAction(timeline.currentState, action);
+
+    const masterClock = game.multiverse['timeline-alpha'] ? game.multiverse['timeline-alpha'].currentState.gameStep : 0;
+    const expiresOnStep = masterClock + duration;
+
+    game.portals.push({
+        fromTimelineId: activeTimelineId,
+        toTimelineId: toTimelineId,
+        coords: selectedTile,
+        expiresOnStep: expiresOnStep
+    });
+     game.portals.push({
+        fromTimelineId: toTimelineId,
+        toTimelineId: activeTimelineId,
+        coords: selectedTile,
+        expiresOnStep: expiresOnStep
+    });
+}
 
 /**
  * Finds the location and state of a player's General tile.
@@ -763,7 +816,7 @@ function handlePlayerDefeat(victorId, defeatedId, currentGameState) {
 }
 
 /**
- * Updates visibility for a single player across all timelines and stores it in the global game object.
+ * Calculates a separate visibility grid for each timeline for a specific player.
  * @param {number} playerId - The ID of the player to calculate visibility for.
  * @param {object} game - The global game object.
  */
@@ -803,11 +856,9 @@ function updatePlayerVisibility(playerId, game) {
 }
 
 /**
- * Creates a tailored, pruned version of the game state for a specific player,
- * respecting fog of war rules by scrubbing data the player shouldn't be able to see.
- * This is the canonical way to implement fog of war, preventing information leaks to the client.
+ * Creates a tailored, pruned version of the game state for a specific player.
  * @param {number} playerId - The ID of the player for whom to generate the state.
- * @returns {object} A complete, but pruned, game state object ready to be sent to the client.
+ * @returns {object} A pruned game state object ready to be sent to the client.
  */
 function getPrunedClientState(playerId) {
     const prunedMultiverse = JSON.parse(JSON.stringify(game.multiverse));
@@ -824,7 +875,6 @@ function getPrunedClientState(playerId) {
                 for (let c = 0; c < BOARD_COLS; c++) {
                     if (!visibilityGrid[r][c]) {
                         const originalTile = timelineState.board[r][c];
-                        // Scrub sensitive info but keep tile type (e.g., mountains are always visible).
                         timelineState.board[r][c] = {
                             ownerId: 0,
                             army: 0,
@@ -835,7 +885,6 @@ function getPrunedClientState(playerId) {
                 }
             }
 
-            // Filter out moves that are currently invisible to the player.
             timelineState.moves = timelineState.moves.filter(move => {
                 const pos = move.path[move.pathIndex];
                 return pos && visibilityGrid[pos.row] && visibilityGrid[pos.row][pos.col];
@@ -847,7 +896,7 @@ function getPrunedClientState(playerId) {
         multiverse: prunedMultiverse,
         portals: game.portals,
         paradoxEvents: game.paradoxEvents,
-        visibility: game.visibility[playerId], // Send the player their own visibility grid
+        visibility: game.visibility[playerId],
         boardDimensions: game.boardDimensions,
         playerStats: game.playerStats,
         settings: game.settings
@@ -862,13 +911,11 @@ io.on('connection', (socket) => {
         socket.disconnect();
         return;
     }
-    // Add new player to the game.
     game.playerCount++;
     const playerId = game.playerCount;
     const color = PLAYER_COLORS[(playerId - 1) % PLAYER_COLORS.length];
     game.players[socket.id] = { id: playerId, name: `Player ${playerId}`, color: color, isReady: false };
 
-    // Assign the first player to connect as the host.
     if (game.hostId === null) {
         game.hostId = socket.id;
     }
@@ -885,8 +932,7 @@ io.on('connection', (socket) => {
             game.settings.mountainPercent = Math.max(0, Math.min(50, parseInt(newSettings.mountainPercent) || 0));
             game.settings.forestPercent = Math.max(0, Math.min(50, parseInt(newSettings.forestPercent) || 0));
             game.settings.cityCount = Math.max(0, Math.min(20, parseInt(newSettings.cityCount) || 0));
-            const hostPlayerId = game.players[game.hostId]?.id;
-            io.emit('lobby-update', { players: Object.values(game.players), settings: game.settings, hostPlayerId });
+            io.emit('lobby-update', { players: Object.values(game.players), settings: game.settings, hostPlayerId: game.players[game.hostId]?.id });
         }
     });
 
@@ -895,30 +941,25 @@ io.on('connection', (socket) => {
         const player = game.players[socket.id];
         if (player) {
             player.isReady = isReady;
-            const hostPlayerId = game.players[game.hostId]?.id;
-            io.emit('lobby-update', { players: Object.values(game.players), settings: game.settings, hostPlayerId });
+            io.emit('lobby-update', { players: Object.values(game.players), settings: game.settings, hostPlayerId: game.players[game.hostId]?.id });
 
             const allPlayers = Object.values(game.players);
             const allReady = allPlayers.length > 0 && allPlayers.every(p => p.isReady);
 
-            // Start the game if all connected players are ready.
-            if (allReady && allPlayers.length >= 1) { // Changed to 1 for easier testing, recommend setting to 2 for production
+            if (allReady && allPlayers.length >= 1) {
                 initializeGame(game);
                 const dynamicGameLoop = () => {
                     if (game.gameState !== 'RUNNING') return;
-                    // The game slows down as more timelines are created.
                     const activeTimelinesCount = Object.values(game.multiverse).filter(t => !t.isFrozen).length || 1;
                     const tickDuration = GAME_TICK_MS * activeTimelinesCount;
                     gameLoop(game);
 
-                    // Update stats and visibility for all players before sending state
                     calculatePlayerStats(game);
                     for (const socketId in game.players) {
                         const player = game.players[socketId];
                         updatePlayerVisibility(player.id, game);
                     }
 
-                    // Send personalized game state updates to each player (for fog of war).
                     for (const socketId in game.players) {
                         if (io.sockets.sockets.get(socketId)) {
                             const player = game.players[socketId];
@@ -935,7 +976,6 @@ io.on('connection', (socket) => {
         }
     });
     
-    // Server-side calculation to determine how far back a player can afford to rollback.
     socket.on('get-rollback-info', ({ activeTimelineId }) => {
         const player = game.players[socket.id];
         if (!player) return;
@@ -965,7 +1005,6 @@ io.on('connection', (socket) => {
         socket.emit('rollback-info-response', { oldestAffordableStep });
     });
     
-    // Server-side calculation for the max duration a player can afford for a timed action.
     socket.on('get-affordability-info', ({ actionType, activeTimelineId }) => {
         const player = game.players[socket.id];
         if (!player) return;
@@ -989,7 +1028,6 @@ io.on('connection', (socket) => {
         socket.emit('affordability-info-response', { actionType, maxDuration });
     });
     
-    // Main handler for all in-game player actions.
     socket.on('player-action', (action) => {
         if (game.gameState !== 'RUNNING') return;
         const player = game.players[socket.id];
@@ -1008,33 +1046,28 @@ io.on('connection', (socket) => {
     socket.on('disconnect', () => {
         const disconnectedPlayer = game.players[socket.id];
         if (disconnectedPlayer) {
-            // If in-game, treat the disconnect as a defeat.
             if (game.gameState === 'RUNNING') {
                 const disconnectedPlayerId = disconnectedPlayer.id;
                 for (const timelineId in game.multiverse) {
                     const timeline = game.multiverse[timelineId];
-                    handlePlayerDefeat(0, disconnectedPlayerId, timeline.currentState); // Player 0 is neutral
+                    handlePlayerDefeat(0, disconnectedPlayerId, timeline.currentState);
                 }
             }
             delete game.players[socket.id];
             game.playerCount--;
 
-            // If the host disconnects, assign a new host.
             if (socket.id === game.hostId) { 
                 const newHostSocket = Object.keys(game.players)[0];
                 game.hostId = newHostSocket || null;
             }
 
-            // Update remaining players.
             if (game.gameState === 'LOBBY') {
-                const hostPlayerId = game.players[game.hostId]?.id;
-                 io.emit('lobby-update', { players: Object.values(game.players), settings: game.settings, hostPlayerId });
+                 io.emit('lobby-update', { players: Object.values(game.players), settings: game.settings, hostPlayerId: game.players[game.hostId]?.id });
             } else {
                  io.emit('player-list-update', Object.values(game.players));
             }
         }
         
-        // If not enough players are left, end the game.
         if (game.gameState === 'RUNNING' && game.playerCount < 2) {
             clearTimeout(game.gameInterval);
             io.emit('game-over', { winnerId: 'none', reason: 'Not enough players.' });
