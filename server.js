@@ -236,7 +236,9 @@ function applyAction(gameState, action) {
 }
 
 /**
- * Validates and processes a player's move action.
+ * Validates and processes a player's move action. If the player already has an
+ * army in motion, this function will cancel the existing move, return its army,
+ * and then create the new move. This allows players to fluidly redirect their active army.
  * @param {number} playerId - The ID of the player making the move.
  * @param {object} action - The move action object from the client.
  * @param {string} activeTimelineId - The ID of the timeline where the move occurs.
@@ -255,16 +257,42 @@ function processMove(playerId, action, activeTimelineId, game) {
     const startTile = board[path[0].row]?.[path[0].col];
     if (!startTile || startTile.ownerId !== playerId || startTile.army <= 1) return;
 
+    // --- NEW CANCELLATION LOGIC ---
+    // Find the index of any existing move from the same player.
+    const existingMoveIndex = gameState.moves.findIndex(move => move.ownerId === playerId);
+
+    // If an existing move is found (index is not -1)...
+    if (existingMoveIndex !== -1) {
+        // Get the old move object.
+        const oldMove = gameState.moves[existingMoveIndex];
+        
+        // Determine its last position.
+        const lastPosition = oldMove.path[oldMove.pathIndex];
+        const returnTile = board[lastPosition.row]?.[lastPosition.col];
+
+        // If the tile still exists, return the army to it.
+        if (returnTile) {
+            returnTile.army += oldMove.army;
+        }
+
+        // Remove the old move from the array.
+        gameState.moves.splice(existingMoveIndex, 1);
+    }
+
+    // Validate the entire path for the new move to ensure it's legal.
     for (let i = 0; i < path.length; i++) {
         const { row, col } = path[i];
         const tile = board[row]?.[col];
+        // Path cannot go through mountains or off the board.
         if (!tile || tile.type === TILE_TYPE.MOUNTAIN) return;
         if (i > 0) {
             const prev = path[i - 1];
+            // Path must be contiguous (no diagonal or skipping tiles).
             if (Math.abs(col - prev.col) + Math.abs(row - prev.row) !== 1) return;
         }
     }
     
+    // If all checks pass, record and apply the new action.
     const actionForHistory = { type: 'MOVE', playerId, path, isSplit: action.isSplit };
     timeline.actions.push({ step: gameState.gameStep, action: actionForHistory });
     applyAction(gameState, actionForHistory);
@@ -573,6 +601,13 @@ function updateTimeline(timeline, timelineId, game) {
  * Manages paradoxes by checking for causality violations.
  * @param {object} game - The global game object.
  */
+/**
+ * Manages paradoxes by checking for causality violations. If a paradox is found
+ * (e.g., a unit exists from a timeline that has been rolled back or unraveled),
+ * this function will neutralize the paradoxical units and territory and trigger a visual event.
+ * It also handles the unravelling of timelines that no longer have a valid parent.
+ * @param {object} game - The global game object.
+ */
 function paradoxHandler(game) {
     for (const timelineId in game.multiverse) {
         const timeline = game.multiverse[timelineId];
@@ -616,9 +651,14 @@ function paradoxHandler(game) {
                 if (tile.causalityTag) {
                     const origin = game.multiverse[tile.causalityTag.originTimelineId];
                     if (!origin || origin.currentState.gameStep < tile.causalityTag.originStep || origin.isUnravelling) {
+                        console.log(`Paradox at ${timelineId} (${row},${col}) from ${tile.causalityTag.originTimelineId}`);
+                        // --- BUG FIX ---
+                        // Resetting not only the army but also the ownership of the tile.
+                        // This prevents players from retaining territory gained from paradoxical actions.
                         tile.army = 0;
+                        tile.ownerId = 0; // This line prevents the unit duplication bug.
                         delete tile.causalityTag;
-                        game.paradoxEvents.push({ timelineId, coords: { row, col }, duration: 10 });
+                        game.paradoxEvents.push({ timelineId, coords: { row, col }, duration: 30 });
                     }
                 }
             }
@@ -629,8 +669,9 @@ function paradoxHandler(game) {
             if (move.causalityTag) {
                 const origin = game.multiverse[move.causalityTag.originTimelineId];
                 if (!origin || origin.currentState.gameStep < move.causalityTag.originStep || origin.isUnravelling) {
+                    console.log(`Paradox move in ${timelineId} from ${move.causalityTag.originTimelineId}`);
                     const coords = move.path[move.pathIndex];
-                    game.paradoxEvents.push({ timelineId, coords, duration: 10 });
+                    game.paradoxEvents.push({ timelineId, coords, duration: 30 });
                     currentGameState.moves.splice(i, 1);
                 }
             }

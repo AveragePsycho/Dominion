@@ -591,6 +591,30 @@ window.onload = function() {
             }
         }
 
+        if (localGameState.paradoxEvents) {
+            localGameState.paradoxEvents.forEach(event => {
+                if (event.timelineId === activeTimelineId) {
+                    const { row, col } = event.coords;
+                    const x = col * TILE_SIZE, y = row * TILE_SIZE;
+                    
+                    // Check if the effect is within the visible culling area
+                    if (row >= startRow && row < endRow && col >= startCol && col < endCol) {
+                        const effectRadius = (event.duration / 30) * TILE_SIZE * 0.7;
+                        const effectOpacity = (event.duration / 30);
+
+                        ctx.fillStyle = `rgba(255, 0, 0, ${effectOpacity})`;
+                        ctx.strokeStyle = `rgba(255, 100, 100, ${effectOpacity})`;
+                        ctx.lineWidth = 2 / camera.zoom;
+
+                        ctx.beginPath();
+                        ctx.arc(x + TILE_SIZE / 2, y + TILE_SIZE / 2, effectRadius, 0, Math.PI * 2);
+                        ctx.fill();
+                        ctx.stroke();
+                    }
+                }
+            });
+        }
+
         // --- Render Player Input (Path Drawing) ---
         if (inputState.isDragging && inputState.path.length > 0) {
             ctx.strokeStyle = '#FFFFFF';
