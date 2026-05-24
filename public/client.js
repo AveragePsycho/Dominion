@@ -54,6 +54,7 @@ window.onload = function() {
     // --- UI and Interaction State ---
     let lastServerUpdate = performance.now();
     let inputState = { isDragging: false, startTile: null, path: [], endTile: null, isSplitMove: false };
+    let keyboardInputState = { path: [], timer: null };
     let selectedTile = null;
     let isFogOfWarEnabled = true;
     let previouslyVisibleEnemies = {}; 
@@ -87,7 +88,7 @@ window.onload = function() {
     const timelineControls = document.getElementById('timeline-controls');
     const timelineListContainer = document.getElementById('timeline-list-container');
     const customizationContainer = document.getElementById('customization-container');
-    const allCustomizationInputs = [document.getElementById('fogToggle'), document.getElementById('staggeredStartToggle'), document.getElementById('fairGeneralsToggle'), document.getElementById('mountainPercent'), document.getElementById('forestPercent'), document.getElementById('cityCount')];
+    const allCustomizationInputs = [document.getElementById('fogToggle'), document.getElementById('staggeredStartToggle'), document.getElementById('fairGeneralsToggle'), document.getElementById('mountainPercent'), document.getElementById('forestPercent'), document.getElementById('cityCount'), document.getElementById('maxMovingArmies')];
     
     const modalOverlay = document.getElementById('custom-modal-overlay');
     const modalTitle = document.getElementById('modal-title');
@@ -435,6 +436,7 @@ window.onload = function() {
         allCustomizationInputs[3].value = settings.mountainPercent;
         allCustomizationInputs[4].value = settings.forestPercent;
         allCustomizationInputs[5].value = settings.cityCount;
+        allCustomizationInputs[6].value = settings.maxMovingArmies || 3;
     }
     
     /**
@@ -632,6 +634,20 @@ window.onload = function() {
             ctx.setLineDash([]);
         }
 
+        // --- Render Keyboard Input (Preplanning Path Drawing) ---
+        if (keyboardInputState.path.length > 0) {
+            ctx.strokeStyle = '#00FFCC'; // Neon cyan for keyboard planning path
+            ctx.lineWidth = 3 / camera.zoom;
+            ctx.beginPath();
+            const firstTile = keyboardInputState.path[0];
+            ctx.moveTo((firstTile.col * TILE_SIZE) + (TILE_SIZE / 2), (firstTile.row * TILE_SIZE) + (TILE_SIZE / 2));
+            for (let i = 1; i < keyboardInputState.path.length; i++) {
+                const tile = keyboardInputState.path[i];
+                ctx.lineTo((tile.col * TILE_SIZE) + (TILE_SIZE / 2), (tile.row * TILE_SIZE) + (TILE_SIZE / 2));
+            }
+            ctx.stroke();
+        }
+
         // --- Render Selected Tile Highlight ---
         if (selectedTile) {
             const x = selectedTile.col * TILE_SIZE, y = selectedTile.row * TILE_SIZE;
@@ -683,13 +699,132 @@ window.onload = function() {
     // --- 4. INPUT EVENT LISTENERS ---
 
     function getTileFromMouseEvent(event) { const r = canvas.getBoundingClientRect(); const x = (event.clientX - r.left - camera.x) / camera.zoom; const y = (event.clientY - r.top - camera.y) / camera.zoom; const col = Math.floor(x / BASE_TILE_SIZE); const row = Math.floor(y / BASE_TILE_SIZE); if (row >= 0 && row < localGameState.boardDimensions.rows && col >= 0 && col < localGameState.boardDimensions.cols) return { row, col }; return null; }
-    function handleMouseDown(event) { const t = getTileFromMouseEvent(event); if (!t) return; if (event.button === 0 || event.button === 2) { inputState.isDragging = true; inputState.startTile = t; inputState.path = [t]; inputState.endTile = t; inputState.isSplitMove = (event.button === 2); } else if (event.button === 1) { event.preventDefault(); panningState.isPanning = true; panningState.lastMouseX = event.clientX; panningState.lastMouseY = event.clientY; } }
+    function handleMouseDown(event) {
+        // Clear keyboard preplanning on manual mouse interaction
+        if (keyboardInputState.timer) clearTimeout(keyboardInputState.timer);
+        keyboardInputState.path = [];
+
+        const t = getTileFromMouseEvent(event);
+        if (!t) return;
+        if (event.button === 0 || event.button === 2) {
+            inputState.isDragging = true;
+            inputState.startTile = t;
+            inputState.path = [t];
+            inputState.endTile = t;
+            inputState.isSplitMove = (event.button === 2);
+        } else if (event.button === 1) {
+            event.preventDefault();
+            panningState.isPanning = true;
+            panningState.lastMouseX = event.clientX;
+            panningState.lastMouseY = event.clientY;
+        }
+    }
     function handleMouseMove(event) { if (inputState.isDragging) { const c = getTileFromMouseEvent(event); if (c) { inputState.endTile = c; let l = inputState.path[inputState.path.length - 1]; while (c.row !== l.row || c.col !== l.col) { const dX = c.col - l.col; const dY = c.row - l.row; let n = { row: l.row, col: l.col }; if (Math.abs(dX) > Math.abs(dY)) { n.col += Math.sign(dX); } else { n.row += Math.sign(dY); } const t = localGameState.multiverse[activeTimelineId]; if (!t) break; const T = t.currentState.board[n.row]?.[n.col]; if (T && T.type !== TILE_TYPE.MOUNTAIN) { if (n.row !== l.row || n.col !== l.col) { inputState.path.push(n); l = n; } } else { break; } } } } else if (panningState.isPanning) { const dX = event.clientX - panningState.lastMouseX; const dY = event.clientY - panningState.lastMouseY; camera.x += dX; camera.y += dY; panningState.lastMouseX = event.clientX; panningState.lastMouseY = event.clientY; } }
     function handleMouseUp(event) { if (event.button === 0 || event.button === 2) { if (inputState.isDragging) { if (inputState.path.length > 1) { socket.emit('player-action', { type: 'MOVE', path: inputState.path, isSplit: inputState.isSplitMove, activeTimelineId: activeTimelineId }); selectedTile = null; } else { selectedTile = inputState.startTile; } inputState.isDragging = false; inputState.isSplitMove = false; inputState.startTile = null; inputState.endTile = null; inputState.path = []; } } else if (event.button === 1) { panningState.isPanning = false; } }
     function handleContextMenu(event) { event.preventDefault(); }
     function handleWheel(event) { event.preventDefault(); const r = canvas.getBoundingClientRect(); const mX = event.clientX - r.left; const mY = event.clientY - r.top; const wX = (mX - camera.x) / camera.zoom; const wY = (mY - camera.y) / camera.zoom; const z = event.deltaY > 0 ? 0.9 : 1.1; const nZ = Math.max(camera.minZoom, Math.min(camera.maxZoom, camera.zoom * z)); camera.x = mX - wX * nZ; camera.y = mY - wY * nZ; camera.zoom = nZ; }
     function handleReadyButtonClick() { isReady = !isReady; socket.emit('player-ready', isReady); if (isReady) { readyBtn.textContent = 'Unready'; readyBtn.classList.add('ready'); } else { readyBtn.textContent = 'Ready Up'; readyBtn.classList.remove('ready'); } }
-    function handleKeyDown(event) { if (!modalOverlay.classList.contains('hidden')) return; const t = Object.keys(localGameState.multiverse); if (t.length > 1) { const c = t.indexOf(activeTimelineId); let n = c; if (event.key === 'e') n = (c + 1) % t.length; else if (event.key === 'q') n = (c - 1 + t.length) % t.length; if (n !== c) { activeTimelineId = t[n]; updatePlayerListView(); } } if (selectedTile) { let d = null; switch (event.key) { case 'w': case 'ArrowUp': d = { row: selectedTile.row - 1, col: selectedTile.col }; event.preventDefault(); break; case 'a': case 'ArrowLeft': d = { row: selectedTile.row, col: selectedTile.col - 1 }; event.preventDefault(); break; case 's': case 'ArrowDown': d = { row: selectedTile.row + 1, col: selectedTile.col }; event.preventDefault(); break; case 'd': case 'ArrowRight': d = { row: selectedTile.row, col: selectedTile.col + 1 }; event.preventDefault(); break; } if (d) { if (d.row >= 0 && d.row < localGameState.boardDimensions.rows && d.col >= 0 && d.col < localGameState.boardDimensions.cols) { const c = localGameState.multiverse[activeTimelineId]; if (c) { const T = c.currentState.board[d.row]?.[d.col]; if (T && T.type !== TILE_TYPE.MOUNTAIN) { const p = [selectedTile, d]; socket.emit('player-action', { type: 'MOVE', path: p, activeTimelineId: activeTimelineId }); selectedTile = d; } } } } } }
+    function handleKeyDown(event) {
+        if (!modalOverlay.classList.contains('hidden')) return;
+
+        // Cycle timelines with Q and E
+        const t = Object.keys(localGameState.multiverse);
+        if (t.length > 1) {
+            const c = t.indexOf(activeTimelineId);
+            let n = c;
+            if (event.key === 'e' || event.key === 'E') n = (c + 1) % t.length;
+            else if (event.key === 'q' || event.key === 'Q') n = (c - 1 + t.length) % t.length;
+            if (n !== c) {
+                activeTimelineId = t[n];
+                updatePlayerListView();
+                // Clear active preplanned keyboard path on timeline cycle
+                if (keyboardInputState.timer) clearTimeout(keyboardInputState.timer);
+                keyboardInputState.path = [];
+            }
+        }
+
+        // Handle WASD / Arrow movement preplanning
+        if (selectedTile) {
+            let d = null;
+            const refTile = keyboardInputState.path.length > 0 
+                ? keyboardInputState.path[keyboardInputState.path.length - 1] 
+                : selectedTile;
+
+            switch (event.key) {
+                case 'w':
+                case 'W':
+                case 'ArrowUp':
+                    d = { row: refTile.row - 1, col: refTile.col };
+                    event.preventDefault();
+                    break;
+                case 'a':
+                case 'A':
+                case 'ArrowLeft':
+                    d = { row: refTile.row, col: refTile.col - 1 };
+                    event.preventDefault();
+                    break;
+                case 's':
+                case 'S':
+                case 'ArrowDown':
+                    d = { row: refTile.row + 1, col: refTile.col };
+                    event.preventDefault();
+                    break;
+                case 'd':
+                case 'D':
+                case 'ArrowRight':
+                    d = { row: refTile.row, col: refTile.col + 1 };
+                    event.preventDefault();
+                    break;
+                case 'Escape':
+                    // Press Escape to cancel preplanning path
+                    if (keyboardInputState.timer) clearTimeout(keyboardInputState.timer);
+                    keyboardInputState.path = [];
+                    break;
+            }
+
+            if (d) {
+                if (d.row >= 0 && d.row < localGameState.boardDimensions.rows && d.col >= 0 && d.col < localGameState.boardDimensions.cols) {
+                    const c = localGameState.multiverse[activeTimelineId];
+                    if (c) {
+                        const T = c.currentState.board[d.row]?.[d.col];
+                        if (T && T.type !== TILE_TYPE.MOUNTAIN) {
+                            // If this is the start of preplanning
+                            if (keyboardInputState.path.length === 0) {
+                                keyboardInputState.path = [selectedTile, d];
+                            } else {
+                                // Prevent simple immediate backtrack loops in the planning path
+                                const prevTile = keyboardInputState.path[keyboardInputState.path.length - 2];
+                                if (prevTile && prevTile.row === d.row && prevTile.col === d.col) {
+                                    keyboardInputState.path.pop();
+                                } else {
+                                    keyboardInputState.path.push(d);
+                                }
+                            }
+
+                            // Update selection instantly
+                            selectedTile = d;
+
+                            // Emit MOVE instantly
+                            if (keyboardInputState.path.length > 1) {
+                                socket.emit('player-action', {
+                                    type: 'MOVE',
+                                    path: [...keyboardInputState.path],
+                                    activeTimelineId: activeTimelineId
+                                });
+                            }
+
+                            // Clear active path after 300ms of inactivity to remove neon-cyan highlight
+                            if (keyboardInputState.timer) clearTimeout(keyboardInputState.timer);
+                            keyboardInputState.timer = setTimeout(() => {
+                                keyboardInputState.path = [];
+                                keyboardInputState.timer = null;
+                            }, 300);
+                        }
+                    }
+                }
+            }
+        }
+    }
     function handleTimelineTreeClick(event) { const r = treeCanvas.getBoundingClientRect(); const x = event.clientX - r.left; const y = (event.clientY - r.top) + treeCamera.y; let c = false; for (const h of timelineTreeHitboxes) { const d = Math.sqrt(Math.pow(x - h.x, 2) + Math.pow(y - h.y, 2)); if (d < h.radius) { activeTimelineId = h.id; updatePlayerListView(); c = true; break; } } if (c) { historyPreviewState.gameState = null; timelineScrubber.classList.add('hidden'); } else { historyPreviewState.gameState = null; timelineScrubber.classList.add('hidden'); scrubberState.active = false; } }
     function handleTimelineTreeMouseDown(event) { const r = treeCanvas.getBoundingClientRect(); const x = event.clientX - r.left; const y = (event.clientY - r.top) + treeCamera.y; for (const h of timelineTreeHitboxes) { if (Math.abs(x - h.x) < 10 && y >= h.startY && y <= h.y) { scrubberState.active = true; scrubberState.timelineId = h.id; updateScrubberAndPreview(event); return; } } }
     function updateScrubberAndPreview(event) { if (!scrubberState.active) return; const t = localGameState.multiverse[scrubberState.timelineId]; if (!t) return; const r = treeCanvas.getBoundingClientRect(); const y = (event.clientY - r.top); const Y = 0.5; const P = 20; let s = Math.round((y + treeCamera.y - P) / Y); s = Math.max(t.anchorStep, Math.min(s, t.currentState.gameStep)); const R = reconstructGameState(t, s); if (R) { historyPreviewState.timelineId = scrubberState.timelineId; historyPreviewState.step = s; historyPreviewState.gameState = R; const x = timelineTreeHitboxes.find(h => h.id === scrubberState.timelineId).x; const sY = (P + s * Y) - treeCamera.y; const cR = timelineListContainer.getBoundingClientRect(); timelineScrubber.style.left = `${x + r.left - cR.left}px`; timelineScrubber.style.top = `${sY + r.top - cR.top}px`; timelineScrubber.classList.remove('hidden'); } }
@@ -699,7 +834,7 @@ window.onload = function() {
     function handleTimelineTreeMouseOver() { isMouseOverTree = true; }
     function handleTimelineTreeMouseOut() { isMouseOverTree = false; hoveredTimelineId = null; }
     function handleTimelineTreeWheel(event) { if (isMouseOverTree) { event.preventDefault(); treeCamera.y += event.deltaY * 0.5; } }
-    function emitSettingsChange() { if (!isHost) return; const n = { fogOfWar: allCustomizationInputs[0].checked, staggeredStart: allCustomizationInputs[1].checked, fairGenerals: allCustomizationInputs[2].checked, mountainPercent: allCustomizationInputs[3].value, forestPercent: allCustomizationInputs[4].value, cityCount: allCustomizationInputs[5].value }; socket.emit('update-game-settings', n); }
+    function emitSettingsChange() { if (!isHost) return; const n = { fogOfWar: allCustomizationInputs[0].checked, staggeredStart: allCustomizationInputs[1].checked, fairGenerals: allCustomizationInputs[2].checked, mountainPercent: allCustomizationInputs[3].value, forestPercent: allCustomizationInputs[4].value, cityCount: allCustomizationInputs[5].value, maxMovingArmies: allCustomizationInputs[6].value }; socket.emit('update-game-settings', n); }
     function handleSplitTimelineClick() { socket.emit('player-action', { type: 'SPLIT', activeTimelineId: activeTimelineId }); }
     function handleRollbackTimelineClick() { const c = localGameState.multiverse[activeTimelineId]?.currentState.gameStep; if (!c) return; socket.emit('get-rollback-info', { activeTimelineId }); }
     function handleAnchorTimelineClick() { socket.emit('player-action', { type: 'ANCHOR', activeTimelineId: activeTimelineId }); }

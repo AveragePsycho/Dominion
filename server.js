@@ -76,7 +76,8 @@ function createNewGame() {
             forestPercent: 15,
             cityCount: 8,
             staggeredStart: false,
-            fairGenerals: true
+            fairGenerals: true,
+            maxMovingArmies: 3
         }
     };
 }
@@ -254,32 +255,7 @@ function processMove(playerId, action, activeTimelineId, game) {
     const gameState = timeline.currentState;
     const board = gameState.board;
 
-    const startTile = board[path[0].row]?.[path[0].col];
-    if (!startTile || startTile.ownerId !== playerId || startTile.army <= 1) return;
-
-    // --- NEW CANCELLATION LOGIC ---
-    // Find the index of any existing move from the same player.
-    const existingMoveIndex = gameState.moves.findIndex(move => move.ownerId === playerId);
-
-    // If an existing move is found (index is not -1)...
-    if (existingMoveIndex !== -1) {
-        // Get the old move object.
-        const oldMove = gameState.moves[existingMoveIndex];
-        
-        // Determine its last position.
-        const lastPosition = oldMove.path[oldMove.pathIndex];
-        const returnTile = board[lastPosition.row]?.[lastPosition.col];
-
-        // If the tile still exists, return the army to it.
-        if (returnTile) {
-            returnTile.army += oldMove.army;
-        }
-
-        // Remove the old move from the array.
-        gameState.moves.splice(existingMoveIndex, 1);
-    }
-
-    // Validate the entire path for the new move to ensure it's legal.
+    // 1. Physically validate the path first (existence, mountains, contiguity)
     for (let i = 0; i < path.length; i++) {
         const { row, col } = path[i];
         const tile = board[row]?.[col];
@@ -291,6 +267,84 @@ function processMove(playerId, action, activeTimelineId, game) {
             if (Math.abs(col - prev.col) + Math.abs(row - prev.row) !== 1) return;
         }
     }
+
+    // --- SEAMLESS PATH EXTENSIONS ---
+    // Check if this move is an extension of an existing active move for this player.
+    let extended = false;
+    for (let i = 0; i < gameState.moves.length; i++) {
+        const move = gameState.moves[i];
+        if (move.ownerId !== playerId) continue;
+
+        // Case A (Prefix Extension): new path starts with the old path up to its length
+        let isPrefixExtension = path.length > move.path.length;
+        if (isPrefixExtension) {
+            for (let j = 0; j < move.path.length; j++) {
+                if (path[j].row !== move.path[j].row || path[j].col !== move.path[j].col) {
+                    isPrefixExtension = false;
+                    break;
+                }
+            }
+        }
+
+        if (isPrefixExtension) {
+            move.path = path;
+            extended = true;
+            break;
+        }
+
+        // Case B (Destination Extension): starting tile of the new path matches final destination of old path
+        const lastTile = move.path[move.path.length - 1];
+        if (path[0].row === lastTile.row && path[0].col === lastTile.col) {
+            // Append subsequent steps of the new path
+            move.path = move.path.concat(path.slice(1));
+            extended = true;
+            break;
+        }
+    }
+
+    if (extended) {
+        // Record action and return early without resetting progress or returning troops
+        const actionForHistory = { type: 'MOVE', playerId, path, isSplit: action.isSplit };
+        timeline.actions.push({ step: gameState.gameStep, action: actionForHistory });
+        return;
+    }
+
+    // 2. TARGET-SPECIFIC REDIRECTION & LIMIT ENFORCEMENT
+    // Compare the new move's starting tile against all active moves of the player.
+    // If a move starts at or is currently located at path[0], we redirect it.
+    const existingMoveIndex = gameState.moves.findIndex(move => {
+        if (move.ownerId !== playerId) return false;
+        const origStart = move.path[0];
+        const currentPos = move.path[move.pathIndex];
+        const newStart = path[0];
+
+        const isOrigStartMatch = origStart.row === newStart.row && origStart.col === newStart.col;
+        const isCurrentPosMatch = currentPos.row === newStart.row && currentPos.col === newStart.col;
+
+        return isOrigStartMatch || isCurrentPosMatch;
+    });
+
+    if (existingMoveIndex !== -1) {
+        // Redirection: cancel/replace only that specific move and return troops
+        const oldMove = gameState.moves[existingMoveIndex];
+        const lastPosition = oldMove.path[oldMove.pathIndex];
+        const returnTile = board[lastPosition.row]?.[lastPosition.col];
+        if (returnTile) {
+            returnTile.army += oldMove.army;
+        }
+        gameState.moves.splice(existingMoveIndex, 1);
+    } else {
+        // Completely new move: check maxMovingArmies limit
+        const activeMovesCount = gameState.moves.filter(move => move.ownerId === playerId).length;
+        const maxLimit = game.settings.maxMovingArmies || 3;
+        if (activeMovesCount >= maxLimit) {
+            return; // Block the move
+        }
+    }
+
+    // 3. Validate ownership and size of the starting tile
+    const startTile = board[path[0].row]?.[path[0].col];
+    if (!startTile || startTile.ownerId !== playerId || startTile.army <= 1) return;
     
     // If all checks pass, record and apply the new action.
     const actionForHistory = { type: 'MOVE', playerId, path, isSplit: action.isSplit };
@@ -629,6 +683,14 @@ function paradoxHandler(game) {
                 }
             }
             if (!tilesRemaining) {
+                // Reparent downstream child timelines to grandparent to prevent breaking the active timelines view
+                const grandparentId = timeline.parentId;
+                for (const otherTimelineId in game.multiverse) {
+                    const otherTimeline = game.multiverse[otherTimelineId];
+                    if (otherTimeline.parentId === timelineId) {
+                        otherTimeline.parentId = grandparentId;
+                    }
+                }
                 delete game.multiverse[timelineId];
             }
         } else if (timeline.parentId) { // Check for timeline existence paradox
@@ -973,6 +1035,7 @@ io.on('connection', (socket) => {
             game.settings.mountainPercent = Math.max(0, Math.min(50, parseInt(newSettings.mountainPercent) || 0));
             game.settings.forestPercent = Math.max(0, Math.min(50, parseInt(newSettings.forestPercent) || 0));
             game.settings.cityCount = Math.max(0, Math.min(20, parseInt(newSettings.cityCount) || 0));
+            game.settings.maxMovingArmies = Math.max(1, Math.min(10, parseInt(newSettings.maxMovingArmies) || 3));
             io.emit('lobby-update', { players: Object.values(game.players), settings: game.settings, hostPlayerId: game.players[game.hostId]?.id });
         }
     });

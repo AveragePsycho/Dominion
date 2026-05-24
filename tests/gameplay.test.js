@@ -231,6 +231,135 @@ describe('Dominion Gameplay Testing Suite', () => {
             expect(timeline.currentState.board[0][1].army).toBe(1);
         });
 
+        test('processMove enforces maxMovingArmies limit and handles concurrent multi-army redirection correctly', () => {
+            // Set limit to 2
+            game.settings.maxMovingArmies = 2;
+
+            // Populate player 1 tiles with armies
+            timeline.currentState.board[1][0] = { type: TILE_TYPE.EMPTY, ownerId: 1, army: 50 };
+            timeline.currentState.board[2][0] = { type: TILE_TYPE.EMPTY, ownerId: 1, army: 50 };
+            timeline.currentState.board[3][0] = { type: TILE_TYPE.EMPTY, ownerId: 1, army: 50 };
+
+            // Issue Move 1: from [1][0] to [1][1]
+            const action1 = {
+                path: [
+                    { row: 1, col: 0 },
+                    { row: 1, col: 1 }
+                ],
+                isSplit: false
+            };
+            processMove(1, action1, 'timeline-alpha', game);
+            expect(timeline.currentState.moves).toHaveLength(1);
+            expect(timeline.currentState.moves[0].path[0]).toEqual({ row: 1, col: 0 });
+
+            // Issue Move 2: from [2][0] to [2][1]
+            const action2 = {
+                path: [
+                    { row: 2, col: 0 },
+                    { row: 2, col: 1 }
+                ],
+                isSplit: false
+            };
+            processMove(1, action2, 'timeline-alpha', game);
+            expect(timeline.currentState.moves).toHaveLength(2);
+            expect(timeline.currentState.moves[1].path[0]).toEqual({ row: 2, col: 0 });
+
+            // Issue Move 3: from [3][0] to [3][1] -> Should be blocked because limit is 2
+            const action3 = {
+                path: [
+                    { row: 3, col: 0 },
+                    { row: 3, col: 1 }
+                ],
+                isSplit: false
+            };
+            processMove(1, action3, 'timeline-alpha', game);
+            // moves length should still be 2, not 3
+            expect(timeline.currentState.moves).toHaveLength(2);
+
+            // Redirect Move 1: from [1][0] to [1][2]
+            const actionRedirect = {
+                path: [
+                    { row: 1, col: 0 },
+                    { row: 1, col: 1 },
+                    { row: 1, col: 2 }
+                ],
+                isSplit: false
+            };
+            processMove(1, actionRedirect, 'timeline-alpha', game);
+
+            // The moves count should still be 2
+            expect(timeline.currentState.moves).toHaveLength(2);
+
+            // Move 1's destination should now be [1][2]
+            const redirectedMove = timeline.currentState.moves.find(m => m.path[m.path.length - 1].row === 1 && m.path[m.path.length - 1].col === 2);
+            expect(redirectedMove).toBeDefined();
+            expect(redirectedMove.army).toBe(49); // 50 - 1 left behind
+
+            // Move 2 should remain completely intact
+            const intactMove = timeline.currentState.moves.find(m => m.path[0].row === 2 && m.path[0].col === 0);
+            expect(intactMove).toBeDefined();
+            expect(intactMove.army).toBe(49); // 50 - 1 left behind
+        });
+
+        test('processMove allows prefix and destination path extensions seamlessly without resetting movement progress', () => {
+            // Set up board for player 1
+            timeline.currentState.board[1][0] = { type: TILE_TYPE.EMPTY, ownerId: 1, army: 50 };
+
+            // 1. Prefix Extension test:
+            // Issue Move 1: [1][0] to [1][1]
+            const action1 = {
+                path: [
+                    { row: 1, col: 0 },
+                    { row: 1, col: 1 }
+                ],
+                isSplit: false
+            };
+            processMove(1, action1, 'timeline-alpha', game);
+            expect(timeline.currentState.moves).toHaveLength(1);
+            
+            const moveObj = timeline.currentState.moves[0];
+            expect(moveObj.path).toHaveLength(2);
+            expect(moveObj.progress).toBe(0);
+
+            // Tick time once, so progress becomes 1
+            runSingleTickLogic(timeline.currentState, 'timeline-alpha', game);
+            expect(moveObj.progress).toBe(1);
+
+            // Issue Prefix Extension: [1][0] -> [1][1] -> [1][2]
+            const actionPrefixExtension = {
+                path: [
+                    { row: 1, col: 0 },
+                    { row: 1, col: 1 },
+                    { row: 1, col: 2 }
+                ],
+                isSplit: false
+            };
+            processMove(1, actionPrefixExtension, 'timeline-alpha', game);
+
+            // Verify path is updated, but progress and army are NOT reset/returned!
+            expect(timeline.currentState.moves).toHaveLength(1);
+            expect(moveObj.path).toHaveLength(3);
+            expect(moveObj.progress).toBe(1); // Crucial: progress was NOT reset to 0!
+            expect(timeline.currentState.board[1][0].army).toBe(1); // Crucial: troops not returned!
+
+            // 2. Destination Extension test:
+            // Issue Destination Extension from the final destination [1][2] to [1][3]
+            const actionDestExtension = {
+                path: [
+                    { row: 1, col: 2 },
+                    { row: 1, col: 3 }
+                ],
+                isSplit: false
+            };
+            processMove(1, actionDestExtension, 'timeline-alpha', game);
+
+            // Verify path has been appended, progress remains 1
+            expect(timeline.currentState.moves).toHaveLength(1);
+            expect(moveObj.path).toHaveLength(4);
+            expect(moveObj.path[3]).toEqual({ row: 1, col: 3 });
+            expect(moveObj.progress).toBe(1); // Crucial: progress not reset!
+        });
+
         test('soldier accumulation ticks operate normally based on step count', () => {
             // General accumulates 1 soldier every 4 ticks
             // Land (Empty) accumulates 1 soldier every 20 ticks
@@ -644,6 +773,44 @@ describe('Dominion Gameplay Testing Suite', () => {
             // It should erase the general tile
             expect(childTimeline.currentState.board[0][0].type).toBe(TILE_TYPE.ERASED);
             expect(childTimeline.currentState.board[0][0].army).toBe(0);
+        });
+
+        test('timeline erasure reparents child timelines to grandparent to preserve UI connectivity', () => {
+            // 1. Set timeline-alpha step to 10 and split to create timeline-beta
+            timeline.currentState.gameStep = 10;
+            timeline.keyframes.push({ step: 10, gameState: JSON.parse(JSON.stringify(timeline.currentState)) });
+            splitTimeline(1, 'timeline-alpha', game);
+
+            const betaId = Object.keys(game.multiverse).find(id => id !== 'timeline-alpha');
+            const betaTimeline = game.multiverse[betaId];
+            expect(betaTimeline.parentId).toBe('timeline-alpha');
+
+            // 2. Set timeline-beta step to 20 and split to create timeline-gamma
+            betaTimeline.currentState.gameStep = 20;
+            betaTimeline.keyframes.push({ step: 20, gameState: JSON.parse(JSON.stringify(betaTimeline.currentState)) });
+            splitTimeline(1, betaId, game);
+
+            const gammaId = Object.keys(game.multiverse).find(id => id !== 'timeline-alpha' && id !== betaId);
+            const gammaTimeline = game.multiverse[gammaId];
+            expect(gammaTimeline.parentId).toBe(betaId);
+
+            // 3. Rollback timeline-alpha past timeline-beta's splitStep (10)
+            rollbackTimeline(1, 'timeline-alpha', 0, game);
+
+            // 4. Run paradoxHandler to trigger unravelling of timeline-beta
+            paradoxHandler(game);
+            expect(betaTimeline.isUnravelling).toBe(true);
+
+            // 5. Progress paradoxHandler until timeline-beta is completely erased/deleted
+            for (let i = 0; i < 15; i++) {
+                paradoxHandler(game);
+            }
+
+            // 6. Verify timeline-beta is deleted
+            expect(game.multiverse[betaId]).toBeUndefined();
+
+            // 7. Verify timeline-gamma's parentId has been updated to grandparent (timeline-alpha)!
+            expect(gammaTimeline.parentId).toBe('timeline-alpha');
         });
 
         test('causality violation: units and territory erased if hopped-from portal history is undone', () => {
