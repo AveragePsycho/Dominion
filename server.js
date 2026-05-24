@@ -1117,6 +1117,52 @@ io.on('connection', (socket) => {
     });
 });
 
-server.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
-});
+if (process.env.NODE_ENV !== 'test') {
+    server.listen(PORT, () => {
+        console.log(`Server is running on port ${PORT}`);
+    });
+}
+
+if (process.env.NODE_ENV === 'test') {
+    module.exports = {
+        // Global Game Object
+        getGame: () => game,
+        setGame: (newGame) => { game = newGame; },
+        
+        // Functions
+        createNewGame,
+        calculateMapDimensions,
+        generateSpawnPoints,
+        initializeGame,
+        processMove,
+        runSingleTickLogic,
+        splitTimeline,
+        findValidAdjacentTile,
+        calculatePlayerStats,
+        gameLoop,
+        updateTimeline,
+        freezeTimeline,
+        overclockTimeline,
+        rollbackTimeline,
+        anchorTimeline,
+        openPortal,
+        findGeneral,
+        handlePlayerDefeat,
+        updatePlayerVisibility,
+        getPrunedClientState,
+        paradoxHandler,
+        
+        // Constants
+        getBoardCols: () => BOARD_COLS,
+        setBoardCols: (val) => { BOARD_COLS = val; },
+        getBoardRows: () => BOARD_ROWS,
+        setBoardRows: (val) => { BOARD_ROWS = val; },
+        GAME_TICK_MS,
+        MOVE_TICKS,
+        KEYFRAME_INTERVAL,
+        MAX_PLAYERS,
+        TIME_ACTION_COST,
+        TILE_TYPE,
+        GREEK_ALPHABET
+    };
+}
