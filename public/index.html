@@ -10,6 +10,7 @@
     <div id="top-bar">
         <h1>Dominion</h1>
         <h4>Modo, veni, vici</h4>
+        <button id="return-lobby-btn" class="hidden">Return to Lobby</button>
         <div id="player-id-display" style="font-weight: bold;">Connecting...</div>
     </div>
 
@@ -17,7 +18,15 @@
         <div id="left-panel">
             <div id="player-list-container">
                 <div id="player-list"></div>
-                <button id="ready-btn">Ready Up</button>
+                <div class="lobby-buttons" style="display: flex; flex-direction: column; gap: 8px;">
+                    <button id="ready-btn">Ready Up</button>
+                    <button id="add-ai-btn" class="hidden">Add AI Opponent</button>
+                </div>
+            </div>
+            <!-- AI Debug Panel -->
+            <div id="ai-debug-container" class="hidden">
+                <h3>AI Thoughts Debug</h3>
+                <div id="ai-thoughts-list"></div>
             </div>
             <div id="timeline-controls" class="hidden">
                 <h3>Timeline Controls</h3>
@@ -45,23 +54,145 @@
                             <input type="checkbox" id="fairGeneralsToggle">
                         </div>
                         <div class="option-item">
-                            <label for="mountainPercent">Mountains %</label>
+                            <label for="mountainPercent">Mountains: <span id="mountainPercentVal">10</span>%</label>
                             <input type="range" id="mountainPercent" min="0" max="50" >
                         </div>
                         <div class="option-item">
-                            <label for="forestPercent">Forests %</label>
+                            <label for="forestPercent">Forests: <span id="forestPercentVal">15</span>%</label>
                             <input type="range" id="forestPercent" min="0" max="50" >
                         </div>
-                         <div class="option-item">
-                            <label for="cityCount">Cities (per 1200 tiles)</label>
+                        <div class="option-item">
+                            <label for="cityCount">Cities: <span id="cityCountVal">8</span></label>
                             <input type="range" id="cityCount" min="0" max="20" >
                         </div>
-                         <div class="option-item">
-                             <label for="maxMovingArmies">Max Moving Armies (1-10)</label>
-                             <input type="range" id="maxMovingArmies" min="1" max="10" value="3">
-                         </div>
+                        <div class="option-item">
+                            <label for="maxMovingArmies">Max Moving Armies: <span id="maxMovingArmiesVal">3</span></label>
+                            <input type="range" id="maxMovingArmies" min="1" max="10" value="3">
+                        </div>
+                        <div class="option-item">
+                            <label for="gameTickMs">Tick Rate: <span id="gameTickMsVal">125</span>ms</label>
+                            <input type="range" id="gameTickMs" min="50" max="1000" step="25" value="125">
+                        </div>
+                        <div class="option-item">
+                            <label for="sightRadius">Sight Radius: <span id="sightRadiusVal">2</span></label>
+                            <input type="range" id="sightRadius" min="1" max="5" step="1" value="2">
+                        </div>
+
+                        <!-- Ability Costs -->
+                        <details style="margin-top: 5px;">
+                            <summary>Time Ability Base Costs</summary>
+                            <div class="customization-options" style="padding: 10px 0 0 10px; gap: 8px;">
+                                <div class="option-item">
+                                    <label for="costSplitBase">SPLIT Cost: <span id="costSplitBaseVal">250</span></label>
+                                    <input type="range" id="costSplitBase" min="100" max="1000" step="25" value="250">
+                                </div>
+                                <div class="option-item">
+                                    <label for="costFreezeBase">FREEZE Cost: <span id="costFreezeBaseVal">15</span></label>
+                                    <input type="range" id="costFreezeBase" min="5" max="100" step="5" value="15">
+                                </div>
+                                <div class="option-item">
+                                    <label for="costOverclockBase">OVERCLOCK Cost: <span id="costOverclockBaseVal">20</span></label>
+                                    <input type="range" id="costOverclockBase" min="5" max="100" step="5" value="20">
+                                </div>
+                                <div class="option-item">
+                                    <label for="costPortalBase">PORTAL Cost: <span id="costPortalBaseVal">40</span></label>
+                                    <input type="range" id="costPortalBase" min="10" max="200" step="5" value="40">
+                                </div>
+                                <div class="option-item">
+                                    <label for="costAnchorBase">ANCHOR Cost: <span id="costAnchorBaseVal">200</span></label>
+                                    <input type="range" id="costAnchorBase" min="50" max="1000" step="25" value="200">
+                                </div>
+                            </div>
+                        </details>
+
+                        <!-- AI Tuning Details -->
+                        <details style="margin-top: 5px;">
+                            <summary>AI Agent Configuration</summary>
+                            <div class="customization-options" style="padding: 10px 0 0 10px; gap: 8px;">
+                                <details>
+                                    <summary>Global Behavior</summary>
+                                    <div class="customization-options" style="padding: 10px 0 0 10px; gap: 8px;">
+                                        <div class="option-item">
+                                            <label for="aiWaitChance">Planning Wait Chance: <span id="aiWaitChanceVal">0.08</span></label>
+                                            <input type="range" id="aiWaitChance" min="0.0" max="1.0" step="0.01" value="0.08">
+                                        </div>
+                                        <div class="option-item">
+                                            <label for="aiTokenIncome">Token Income: <span id="aiTokenIncomeVal">5</span></label>
+                                            <input type="range" id="aiTokenIncome" min="1" max="20" step="1" value="5">
+                                        </div>
+                                        <div class="option-item">
+                                            <label for="aiTokenCap">Token Cap: <span id="aiTokenCapVal">50</span></label>
+                                            <input type="range" id="aiTokenCap" min="10" max="200" step="5" value="50">
+                                        </div>
+                                        <div class="option-item">
+                                            <label for="aiFallibilityPercent">Fallibility Percent: <span id="aiFallibilityPercentVal">25</span>%</label>
+                                            <input type="range" id="aiFallibilityPercent" min="0.0" max="1.0" step="0.05" value="0.25">
+                                        </div>
+                                        <div class="option-item">
+                                            <label for="aiGeneralThreatThreshold">Coop Threat Limit: <span id="aiGeneralThreatThresholdVal">300</span></label>
+                                            <input type="range" id="aiGeneralThreatThreshold" min="50" max="1000" step="25" value="300">
+                                        </div>
+                                        <div class="option-item">
+                                            <label for="aiAttentionRadius">AI Attention Radius: <span id="aiAttentionRadiusVal">6</span></label>
+                                            <input type="range" id="aiAttentionRadius" min="3" max="15" step="1" value="6">
+                                        </div>
+                                        <div class="option-item">
+                                            <label for="aiAttentionShiftCooldown">AI Attention Cooldown: <span id="aiAttentionShiftCooldownVal">15</span></label>
+                                            <input type="range" id="aiAttentionShiftCooldown" min="5" max="50" step="1" value="15">
+                                        </div>
+                                        <div class="option-item">
+                                            <label for="aiAlphaStrikeRatio">Alpha Strike Ratio: <span id="aiAlphaStrikeRatioVal">1.25</span>x</label>
+                                            <input type="range" id="aiAlphaStrikeRatio" min="1.0" max="3.0" step="0.05" value="1.25">
+                                        </div>
+                                        <div class="option-item">
+                                            <label for="aiAlphaStrikeThreshold">Alpha Strike Threshold: <span id="aiAlphaStrikeThresholdVal">150</span></label>
+                                            <input type="range" id="aiAlphaStrikeThreshold" min="50" max="500" step="10" value="150">
+                                        </div>
+                                    </div>
+                                </details>
+                                <details style="margin-top: 5px;">
+                                    <summary>Sub-Agent Priority Weights</summary>
+                                    <div class="customization-options" style="padding: 10px 0 0 10px; gap: 8px;">
+                                        <div class="option-item">
+                                            <label for="aiWeightOffensive">Offensive Weight: <span id="aiWeightOffensiveVal">1.0</span>x</label>
+                                            <input type="range" id="aiWeightOffensive" min="0.0" max="5.0" step="0.1" value="1.0">
+                                        </div>
+                                        <div class="option-item">
+                                            <label for="aiWeightDefensive">Defensive Weight: <span id="aiWeightDefensiveVal">1.0</span>x</label>
+                                            <input type="range" id="aiWeightDefensive" min="0.0" max="5.0" step="0.1" value="1.0">
+                                        </div>
+                                        <div class="option-item">
+                                            <label for="aiWeightScouting">Observatory Weight: <span id="aiWeightScoutingVal">1.0</span>x</label>
+                                            <input type="range" id="aiWeightScouting" min="0.0" max="5.0" step="0.1" value="1.0">
+                                        </div>
+                                        <div class="option-item">
+                                            <label for="aiWeightCooperative">Cooperative Weight: <span id="aiWeightCooperativeVal">1.0</span>x</label>
+                                            <input type="range" id="aiWeightCooperative" min="0.0" max="5.0" step="0.1" value="1.0">
+                                        </div>
+                                        <div class="option-item">
+                                            <label for="aiWeightTerritory">Territory Weight: <span id="aiWeightTerritoryVal">1.0</span>x</label>
+                                            <input type="range" id="aiWeightTerritory" min="0.0" max="5.0" step="0.1" value="1.0">
+                                        </div>
+                                    </div>
+                                </details>
+                            </div>
+                        </details>
+
+                        <!-- Config Import/Export Buttons -->
+                        <div class="config-actions" style="margin-top: 15px; display: flex; gap: 8px; justify-content: space-between;">
+                            <button id="import-config-btn" style="flex: 1; padding: 6px; font-size: 12px;">Import Config</button>
+                            <button id="export-config-btn" style="flex: 1; padding: 6px; font-size: 12px;">Export Config</button>
+                        </div>
+                        <input type="file" id="config-file-input" style="display: none;" accept=".json">
                     </div>
-                </details>
+            </div>
+            <!-- Developer Mode Toggle -->
+            <div class="developer-panel hidden" style="padding: 10px; border: 1px dashed #555; border-radius: 4px; background-color: rgba(255,193,7,0.03); margin-top: 10px; display: flex; flex-direction: column; gap: 8px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
+                    <label for="devModeToggle" style="font-weight: bold; color: #ffc107; font-size: 0.85em; cursor: pointer;">Enable Developer Mode</label>
+                    <input type="checkbox" id="devModeToggle" style="cursor: pointer;">
+                </div>
+                <button id="retire-ai-btn" class="hidden" style="width: 100%; padding: 6px; font-size: 11px; background-color: #8b0000; color: white; border: 1px solid #ff4d4d; border-radius: 4px; cursor: pointer; font-weight: bold; transition: all 0.2s ease;">Retire to AI Control</button>
             </div>
         </div>
 
@@ -86,6 +217,7 @@
             <h3 id="modal-title">Modal Title</h3>
             <p id="modal-message">This is the modal message.</p>
             <input type="number" id="modal-input" class="hidden">
+            <textarea id="modal-textarea" class="hidden" rows="8" style="width: 100%; box-sizing: border-box; background-color: #333; border: 1px solid #666; color: #EAEAEA; border-radius: 4px; padding: 8px; margin: 10px auto; resize: none; font-family: monospace; font-size: 11px;"></textarea>
             <div id="modal-cost-display"></div>
             <div class="modal-buttons">
                 <button id="modal-cancel-btn">Cancel</button>

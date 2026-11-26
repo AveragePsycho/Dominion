@@ -39,13 +39,13 @@ function generatePlayerColors(count) {
     }
     return colors;
 }
-const PLAYER_COLORS = generatePlayerColors(MAX_PLAYERS);
+let PLAYER_COLORS = generatePlayerColors(MAX_PLAYERS);
 let game = createNewGame();
 
 // --- Dynamic Cost Formulas (Server-side) ---
-function calculateFreezeCost(duration) { return Math.floor(15 * Math.pow(1.07, duration / 5)); }
-function calculateOverclockCost(duration) { return Math.floor(20 * Math.pow(1.08, duration / 5)); }
-function calculatePortalCost(duration) { return Math.floor(40 * Math.pow(1.06, duration / 5)); }
+function calculateFreezeCost(duration, base = 15) { return Math.floor(base * Math.pow(1.07, duration / 5)); }
+function calculateOverclockCost(duration, base = 20) { return Math.floor(base * Math.pow(1.08, duration / 5)); }
+function calculatePortalCost(duration, base = 40) { return Math.floor(base * Math.pow(1.06, duration / 5)); }
 const COST_CALCULATORS = {
     FREEZE: calculateFreezeCost,
     OVERCLOCK: calculateOverclockCost,
@@ -77,7 +77,30 @@ function createNewGame() {
             cityCount: 8,
             staggeredStart: false,
             fairGenerals: true,
-            maxMovingArmies: 3
+            maxMovingArmies: 3,
+            gameTickMs: 125,
+            sightRadius: 2,
+            costSplitBase: 250,
+            costFreezeBase: 15,
+            costOverclockBase: 20,
+            costPortalBase: 40,
+            costAnchorBase: 200,
+            ai: {
+                waitChance: 0.08,
+                tokenIncome: 5,
+                tokenCap: 50,
+                fallibilityPercent: 0.25,
+                generalThreatThreshold: 300,
+                attentionRadius: 6,
+                attentionShiftCooldown: 15,
+                alphaStrikeRatio: 1.25,
+                alphaStrikeThreshold: 150,
+                weightOffensive: 1.0,
+                weightDefensive: 1.0,
+                weightScouting: 1.0,
+                weightCooperative: 1.0,
+                weightTerritory: 1.0
+            }
         }
     };
 }
@@ -231,7 +254,7 @@ function applyAction(gameState, action) {
              if (generalInfo) generalInfo.tile.army -= cost;
             break;
         case 'ANCHOR':
-            if (generalInfo) generalInfo.tile.army -= TIME_ACTION_COST.ANCHOR;
+            if (generalInfo) generalInfo.tile.army -= (action.cost !== undefined ? action.cost : 200);
             break;
     }
 }
@@ -372,6 +395,45 @@ function runSingleTickLogic(currentGameState, timelineId, game) {
                 continue;
             }
 
+            // Head-on Collision Check: Check if an opposing move is also mid-transit crossing paths on this tick
+            const currentPos = move.path[move.pathIndex];
+            let moveDestroyed = false;
+
+            for (let j = 0; j < currentGameState.moves.length; j++) {
+                const other = currentGameState.moves[j];
+                if (other === move || other.ownerId === move.ownerId) continue;
+
+                const otherCurrentPos = other.path[other.pathIndex];
+                const otherNextPos = other.path[other.pathIndex + 1];
+
+                if (otherCurrentPos && otherNextPos &&
+                    otherCurrentPos.row === nextPos.row &&
+                    otherCurrentPos.col === nextPos.col &&
+                    otherNextPos.row === currentPos.row &&
+                    otherNextPos.col === currentPos.col) {
+                    
+                    if (move.army > other.army) {
+                        move.army -= other.army;
+                        currentGameState.moves.splice(j, 1);
+                        if (j < i) i--; // Adjust index due to removal
+                    } else if (other.army > move.army) {
+                        other.army -= move.army;
+                        currentGameState.moves.splice(i, 1);
+                        moveDestroyed = true;
+                        break;
+                    } else {
+                        // Both destroyed
+                        currentGameState.moves.splice(Math.max(i, j), 1);
+                        currentGameState.moves.splice(Math.min(i, j), 1);
+                        if (Math.min(i, j) < i) i--;
+                        moveDestroyed = true;
+                        break;
+                    }
+                }
+            }
+
+            if (moveDestroyed) continue;
+
             const portal = game.portals.find(p => p.fromTimelineId === timelineId && p.coords.row === nextPos.row && p.coords.col === nextPos.col);
             if (portal) {
                 const toTimeline = game.multiverse[portal.toTimelineId];
@@ -463,7 +525,8 @@ function splitTimeline(playerId, activeTimelineId, game) {
     if (!timeline) return;
 
     const numTimelines = Object.keys(game.multiverse).length;
-    const splitCost = Math.floor(TIME_ACTION_COST.SPLIT_BASE * Math.pow(1.25, numTimelines - 1));
+    const splitBase = game.settings.costSplitBase !== undefined ? game.settings.costSplitBase : 250;
+    const splitCost = Math.floor(splitBase * Math.pow(1.25, numTimelines - 1));
     const generalInfo = findGeneral(playerId, timeline.currentState);
 
     if (!generalInfo || generalInfo.tile.army < splitCost) return;
@@ -582,20 +645,8 @@ function gameLoop(game) {
         clearTimeout(game.gameInterval);
         game.gameState = 'FINISHED';
 
-        setTimeout(() => {
-            const connectedSockets = new Map(io.sockets.sockets);
-            game = createNewGame();
-            let i = 1;
-            connectedSockets.forEach((socket, socketId) => {
-                const color = PLAYER_COLORS[(i-1) % PLAYER_COLORS.length];
-                game.players[socketId] = { id: i, name: `Player ${i}`, color: color, isReady: false };
-                if (game.hostId === null) { game.hostId = socket.id; }
-                socket.emit('player-assignment', {playerId: i, color: color});
-                i++;
-            });
-            game.playerCount = Object.keys(game.players).length;
-            const hostPlayerId = game.players[game.hostId]?.id;
-            io.emit('lobby-update', { players: Object.values(game.players), settings: game.settings, hostPlayerId });
+        game.gameOverTimeout = setTimeout(() => {
+            resetGameToLobby(game);
         }, 10000);
         return;
     }
@@ -833,10 +884,11 @@ function anchorTimeline(playerId, activeTimelineId, game) {
     const timeline = game.multiverse[activeTimelineId];
     if (!timeline) return;
 
+    const anchorCost = game.settings.costAnchorBase !== undefined ? game.settings.costAnchorBase : 200;
     const generalInfo = findGeneral(playerId, timeline.currentState);
-    if (!generalInfo || generalInfo.tile.army < TIME_ACTION_COST.ANCHOR) return;
+    if (!generalInfo || generalInfo.tile.army < anchorCost) return;
 
-    const action = { type: 'ANCHOR', playerId, cost: TIME_ACTION_COST.ANCHOR };
+    const action = { type: 'ANCHOR', playerId, cost: anchorCost };
     timeline.actions.push({ step: timeline.currentState.gameStep, action });
     applyAction(timeline.currentState, action);
 
@@ -935,7 +987,7 @@ function updatePlayerVisibility(playerId, game) {
         return;
     }
 
-    const SIGHT_RADIUS = 2;
+    const SIGHT_RADIUS = game.settings.sightRadius !== undefined ? game.settings.sightRadius : 2;
     for (const timelineId in game.multiverse) {
         const grid = Array(rows).fill(null).map(() => Array(cols).fill(false));
         const gameState = game.multiverse[timelineId].currentState;
@@ -995,6 +1047,29 @@ function getPrunedClientState(playerId) {
         }
     }
 
+    let aiThoughts = [];
+    for (const socketId in game.players) {
+        const p = game.players[socketId];
+        if (p && p.isAI && p.aiInstance && p.aiInstance.thoughts) {
+            aiThoughts = aiThoughts.concat(p.aiInstance.thoughts);
+        }
+    }
+    aiThoughts.sort((a, b) => (b.epoch || 0) - (a.epoch || 0));
+    aiThoughts = aiThoughts.slice(0, 30);
+
+    let aiFocusPoints = {};
+    for (const socketId in game.players) {
+        const p = game.players[socketId];
+        if (p && p.isAI && p.aiInstance) {
+            aiFocusPoints[p.id] = {};
+            for (const [timelineId, agentSet] of p.aiInstance.boardAgents.entries()) {
+                if (agentSet.focalPoint) {
+                    aiFocusPoints[p.id][timelineId] = agentSet.focalPoint;
+                }
+            }
+        }
+    }
+
     return {
         multiverse: prunedMultiverse,
         portals: game.portals,
@@ -1002,20 +1077,123 @@ function getPrunedClientState(playerId) {
         visibility: game.visibility[playerId],
         boardDimensions: game.boardDimensions,
         playerStats: game.playerStats,
-        settings: game.settings
+        settings: game.settings,
+        aiThoughts: aiThoughts,
+        aiFocusPoints: aiFocusPoints
     };
 }
 
 
+/**
+ * Returns a clean, pruned array of player objects suitable for sending to the client.
+ * This removes large or circular server-only references (like aiInstance).
+ * @param {object} playersMap - The game.players object map.
+ * @returns {object[]} Array of clean player objects.
+ */
+/**
+ * Returns a clean, pruned array of player objects suitable for sending to the client.
+ * This removes large or circular server-only references (like aiInstance).
+ * @param {object} playersMap - The game.players object map.
+ * @returns {object[]} Array of clean player objects.
+ */
+function getClientPlayersList(playersMap) {
+    return Object.entries(playersMap).map(([socketId, player]) => {
+        const { aiInstance, ...cleanPlayer } = player;
+        return { ...cleanPlayer, socketId };
+    });
+}
+
+/**
+ * Deterministically resets the game state back to the lobby, preserving human player configurations.
+ * @param {object} game - The global game object.
+ */
+function resetGameToLobby(game) {
+    if (game.gameInterval) clearTimeout(game.gameInterval);
+    if (game.gameOverTimeout) clearTimeout(game.gameOverTimeout);
+
+    // Regenerate randomized golden ratio HSL player colors on lobby reset
+    PLAYER_COLORS = generatePlayerColors(MAX_PLAYERS);
+
+    // Keep active human sockets
+    const connectedSockets = new Map(io.sockets.sockets);
+    
+    // Retain previous game settings
+    const currentSettings = { ...game.settings };
+    
+    // Reset game object
+    const newGame = createNewGame();
+    newGame.settings = currentSettings;
+    
+    let i = 1;
+    connectedSockets.forEach((socket, socketId) => {
+        const color = PLAYER_COLORS[(i - 1) % PLAYER_COLORS.length];
+        newGame.players[socketId] = { id: i, name: `Player ${i}`, color: color, isReady: false };
+        if (newGame.hostId === null) { newGame.hostId = socket.id; }
+        socket.emit('player-assignment', { playerId: i, color: color });
+        i++;
+    });
+
+    game.multiverse = newGame.multiverse;
+    game.portals = newGame.portals;
+    game.paradoxEvents = newGame.paradoxEvents;
+    game.players = newGame.players;
+    game.hostId = newGame.hostId;
+    game.gameState = 'LOBBY';
+    game.timelineNameCounter = newGame.timelineNameCounter;
+    game.visibility = newGame.visibility;
+    game.playerStats = newGame.playerStats;
+
+    // Automatically re-evaluate default AI opponent
+    ensureAIPlayerInLobby(game);
+
+    const hostPlayerId = game.players[game.hostId]?.id;
+    io.emit('lobby-update', { players: getClientPlayersList(game.players), settings: game.settings, hostPlayerId });
+}
+
+/**
+ * Integrates or removes the AI opponent player in the lobby based on the active human player count.
+ * @param {object} game - The global game object.
+ */
+function ensureAIPlayerInLobby(game) {
+    if (game.gameState !== 'LOBBY') return;
+    const humanSockets = Object.keys(game.players).filter(sid => !sid.startsWith('ai-socket-opponent'));
+    
+    // Check if there are any AI players in the lobby (either default or manual)
+    const hasAI = Object.keys(game.players).some(sid => sid.startsWith('ai-socket-opponent'));
+    
+    if (humanSockets.length === 1 && !hasAI) {
+        const aiPlayerId = 2;
+        const aiSocketId = 'ai-socket-opponent';
+        const { AIParticipant } = require('./ai_agent');
+        const color = PLAYER_COLORS[1];
+        const aiInstance = new AIParticipant(aiPlayerId, 'AI Opponent (Medium)', color, 'MEDIUM');
+        game.players[aiSocketId] = {
+            id: aiPlayerId,
+            name: 'AI Opponent (Medium)',
+            color: color,
+            isReady: true,
+            isAI: true,
+            difficulty: 'MEDIUM',
+            aiInstance
+        };
+    }
+    game.playerCount = Object.keys(game.players).length;
+}
+
 // --- Socket.IO Connection Handling ---
 io.on('connection', (socket) => {
-    if (game.playerCount >= MAX_PLAYERS || game.gameState === 'RUNNING') {
+    const humanCount = Object.keys(game.players).filter(sid => !sid.startsWith('ai-socket-opponent')).length;
+    if (humanCount >= MAX_PLAYERS || game.gameState === 'RUNNING') {
         socket.emit('game-in-progress');
         socket.disconnect();
         return;
     }
-    game.playerCount++;
-    const playerId = game.playerCount;
+
+    if (game.players['ai-socket-opponent']) {
+        delete game.players['ai-socket-opponent'];
+    }
+
+    const playerId = humanCount + 1;
     const color = PLAYER_COLORS[(playerId - 1) % PLAYER_COLORS.length];
     game.players[socket.id] = { id: playerId, name: `Player ${playerId}`, color: color, isReady: false };
 
@@ -1023,9 +1201,11 @@ io.on('connection', (socket) => {
         game.hostId = socket.id;
     }
 
+    ensureAIPlayerInLobby(game);
+
     socket.emit('player-assignment', { playerId, color });
     const hostPlayerId = game.players[game.hostId]?.id;
-    io.emit('lobby-update', { players: Object.values(game.players), settings: game.settings, hostPlayerId });
+    io.emit('lobby-update', { players: getClientPlayersList(game.players), settings: game.settings, hostPlayerId });
 
     socket.on('update-game-settings', (newSettings) => {
         if (socket.id === game.hostId && game.gameState === 'LOBBY') {
@@ -1036,7 +1216,34 @@ io.on('connection', (socket) => {
             game.settings.forestPercent = Math.max(0, Math.min(50, parseInt(newSettings.forestPercent) || 0));
             game.settings.cityCount = Math.max(0, Math.min(20, parseInt(newSettings.cityCount) || 0));
             game.settings.maxMovingArmies = Math.max(1, Math.min(10, parseInt(newSettings.maxMovingArmies) || 3));
-            io.emit('lobby-update', { players: Object.values(game.players), settings: game.settings, hostPlayerId: game.players[game.hostId]?.id });
+            game.settings.gameTickMs = Math.max(50, Math.min(1000, parseInt(newSettings.gameTickMs) || 125));
+            game.settings.sightRadius = Math.max(1, Math.min(5, parseInt(newSettings.sightRadius) || 2));
+            game.settings.costSplitBase = Math.max(100, Math.min(1000, parseInt(newSettings.costSplitBase) || 250));
+            game.settings.costFreezeBase = Math.max(5, Math.min(100, parseInt(newSettings.costFreezeBase) || 15));
+            game.settings.costOverclockBase = Math.max(5, Math.min(100, parseInt(newSettings.costOverclockBase) || 20));
+            game.settings.costPortalBase = Math.max(10, Math.min(200, parseInt(newSettings.costPortalBase) || 40));
+            game.settings.costAnchorBase = Math.max(50, Math.min(1000, parseInt(newSettings.costAnchorBase) || 200));
+
+            // AI settings
+            if (newSettings.ai) {
+                if (!game.settings.ai) game.settings.ai = {};
+                game.settings.ai.waitChance = Math.max(0.0, Math.min(1.0, parseFloat(newSettings.ai.waitChance) !== undefined ? parseFloat(newSettings.ai.waitChance) : 0.08));
+                game.settings.ai.tokenIncome = Math.max(1, Math.min(20, parseInt(newSettings.ai.tokenIncome) || 5));
+                game.settings.ai.tokenCap = Math.max(10, Math.min(200, parseInt(newSettings.ai.tokenCap) || 50));
+                game.settings.ai.fallibilityPercent = Math.max(0.0, Math.min(1.0, parseFloat(newSettings.ai.fallibilityPercent) !== undefined ? parseFloat(newSettings.ai.fallibilityPercent) : 0.25));
+                game.settings.ai.generalThreatThreshold = Math.max(50, Math.min(1000, parseInt(newSettings.ai.generalThreatThreshold) || 300));
+                game.settings.ai.attentionRadius = Math.max(3, Math.min(15, parseInt(newSettings.ai.attentionRadius) || 6));
+                game.settings.ai.attentionShiftCooldown = Math.max(5, Math.min(50, parseInt(newSettings.ai.attentionShiftCooldown) || 15));
+                game.settings.ai.alphaStrikeRatio = Math.max(1.0, Math.min(3.0, parseFloat(newSettings.ai.alphaStrikeRatio) !== undefined ? parseFloat(newSettings.ai.alphaStrikeRatio) : 1.25));
+                game.settings.ai.alphaStrikeThreshold = Math.max(50, Math.min(500, parseInt(newSettings.ai.alphaStrikeThreshold) || 150));
+                
+                game.settings.ai.weightOffensive = Math.max(0.0, Math.min(5.0, parseFloat(newSettings.ai.weightOffensive) !== undefined ? parseFloat(newSettings.ai.weightOffensive) : 1.0));
+                game.settings.ai.weightDefensive = Math.max(0.0, Math.min(5.0, parseFloat(newSettings.ai.weightDefensive) !== undefined ? parseFloat(newSettings.ai.weightDefensive) : 1.0));
+                game.settings.ai.weightScouting = Math.max(0.0, Math.min(5.0, parseFloat(newSettings.ai.weightScouting) !== undefined ? parseFloat(newSettings.ai.weightScouting) : 1.0));
+                game.settings.ai.weightCooperative = Math.max(0.0, Math.min(5.0, parseFloat(newSettings.ai.weightCooperative) !== undefined ? parseFloat(newSettings.ai.weightCooperative) : 1.0));
+                game.settings.ai.weightTerritory = Math.max(0.0, Math.min(5.0, parseFloat(newSettings.ai.weightTerritory) !== undefined ? parseFloat(newSettings.ai.weightTerritory) : 1.0));
+            }
+            io.emit('lobby-update', { players: getClientPlayersList(game.players), settings: game.settings, hostPlayerId: game.players[game.hostId]?.id });
         }
     });
 
@@ -1045,7 +1252,7 @@ io.on('connection', (socket) => {
         const player = game.players[socket.id];
         if (player) {
             player.isReady = isReady;
-            io.emit('lobby-update', { players: Object.values(game.players), settings: game.settings, hostPlayerId: game.players[game.hostId]?.id });
+            io.emit('lobby-update', { players: getClientPlayersList(game.players), settings: game.settings, hostPlayerId: game.players[game.hostId]?.id });
 
             const allPlayers = Object.values(game.players);
             const allReady = allPlayers.length > 0 && allPlayers.every(p => p.isReady);
@@ -1055,7 +1262,31 @@ io.on('connection', (socket) => {
                 const dynamicGameLoop = () => {
                     if (game.gameState !== 'RUNNING') return;
                     const activeTimelinesCount = Object.values(game.multiverse).filter(t => !t.isFrozen).length || 1;
-                    const tickDuration = GAME_TICK_MS * activeTimelinesCount;
+                    const tickDuration = (game.settings.gameTickMs || 125) * activeTimelinesCount;
+
+                    // AI logic ticks before running the game tick
+                    for (const socketId in game.players) {
+                        const player = game.players[socketId];
+                        if (player && player.isAI && player.aiInstance) {
+                            const aiPlayer = player.aiInstance;
+                            if (aiPlayer) {
+                                const aiContext = {
+                                    processMove,
+                                    splitTimeline,
+                                    freezeTimeline,
+                                    overclockTimeline,
+                                    rollbackTimeline,
+                                    findGeneral,
+                                    findValidAdjacentTile,
+                                    BOARD_ROWS,
+                                    BOARD_COLS,
+                                    TILE_TYPE
+                                };
+                                aiPlayer.takeTurn(game, aiContext);
+                            }
+                        }
+                    }
+
                     gameLoop(game);
 
                     calculatePlayerStats(game);
@@ -1121,9 +1352,14 @@ io.on('connection', (socket) => {
         const costCalculator = COST_CALCULATORS[actionType];
         if (!costCalculator) return;
         
+        let baseCost = 15;
+        if (actionType === 'FREEZE') baseCost = game.settings.costFreezeBase || 15;
+        else if (actionType === 'OVERCLOCK') baseCost = game.settings.costOverclockBase || 20;
+        else if (actionType === 'HOP') baseCost = game.settings.costPortalBase || 40;
+
         let maxDuration = 0;
         for (let d = 1; d < 500; d++) {
-            if (costCalculator(d) <= generalArmy) {
+            if (costCalculator(d, baseCost) <= generalArmy) {
                 maxDuration = d;
             } else {
                 break;
@@ -1147,6 +1383,94 @@ io.on('connection', (socket) => {
         }
     });
 
+    socket.on('player-retire-to-ai', () => {
+        if (game.gameState !== 'RUNNING') return;
+        const player = game.players[socket.id];
+        if (player && !player.isAI) {
+            player.isAI = true;
+            player.name = `AI (Retired ${player.name})`;
+            const { AIParticipant } = require('./ai_agent');
+            player.aiInstance = new AIParticipant(player.id, player.name, player.color, 'MEDIUM');
+            player.aiInstance.logThought(`[System] Human Player ${player.id} retired to AI control!`);
+            
+            const hostPlayerId = game.players[game.hostId]?.id;
+            io.emit('lobby-update', { players: getClientPlayersList(game.players), settings: game.settings, hostPlayerId });
+        }
+    });
+
+    socket.on('add-ai-player', () => {
+        if (socket.id !== game.hostId || game.gameState !== 'LOBBY') return;
+        
+        const aiSocketId = `ai-socket-opponent-manual-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+        const aiPlayerId = Object.keys(game.players).length + 1;
+        const color = PLAYER_COLORS[(aiPlayerId - 1) % PLAYER_COLORS.length];
+        const { AIParticipant } = require('./ai_agent');
+        
+        const aiInstance = new AIParticipant(aiPlayerId, 'AI Opponent (Medium)', color, 'MEDIUM');
+        game.players[aiSocketId] = {
+            id: aiPlayerId,
+            name: 'AI Opponent (Medium)',
+            color: color,
+            isReady: true,
+            isAI: true,
+            difficulty: 'MEDIUM',
+            aiInstance
+        };
+        game.playerCount = Object.keys(game.players).length;
+
+        const hostPlayerId = game.players[game.hostId]?.id;
+        io.emit('lobby-update', { players: getClientPlayersList(game.players), settings: game.settings, hostPlayerId });
+    });
+
+    socket.on('change-ai-difficulty', ({ aiSocketId, difficulty }) => {
+        if (socket.id !== game.hostId || game.gameState !== 'LOBBY') return;
+        if (!['EASY', 'MEDIUM', 'HARD'].includes(difficulty)) return;
+        
+        const player = game.players[aiSocketId];
+        if (player && player.isAI) {
+            player.difficulty = difficulty;
+            player.name = `AI Opponent (${difficulty.charAt(0) + difficulty.slice(1).toLowerCase()})`;
+            if (player.aiInstance) {
+                player.aiInstance.difficulty = difficulty;
+            }
+            const hostPlayerId = game.players[game.hostId]?.id;
+            io.emit('lobby-update', { players: getClientPlayersList(game.players), settings: game.settings, hostPlayerId });
+        }
+    });
+
+    socket.on('remove-ai-player', ({ aiSocketId }) => {
+        if (socket.id !== game.hostId || game.gameState !== 'LOBBY') return;
+        
+        const player = game.players[aiSocketId];
+        if (player && player.isAI) {
+            delete game.players[aiSocketId];
+            
+            // Re-index remaining players to ensure sequential dynamic IDs
+            let index = 1;
+            for (const sid in game.players) {
+                const p = game.players[sid];
+                p.id = index;
+                if (!p.isAI) {
+                    const clientSocket = io.sockets.sockets.get(sid);
+                    if (clientSocket) {
+                        clientSocket.emit('player-assignment', { playerId: index, color: p.color });
+                    }
+                }
+                index++;
+            }
+            game.playerCount = Object.keys(game.players).length;
+
+            const hostPlayerId = game.players[game.hostId]?.id;
+            io.emit('lobby-update', { players: getClientPlayersList(game.players), settings: game.settings, hostPlayerId });
+        }
+    });
+
+    socket.on('return-to-lobby', () => {
+        if (socket.id === game.hostId && (game.gameState === 'RUNNING' || game.gameState === 'FINISHED')) {
+            resetGameToLobby(game);
+        }
+    });
+
     socket.on('disconnect', () => {
         const disconnectedPlayer = game.players[socket.id];
         if (disconnectedPlayer) {
@@ -1158,24 +1482,30 @@ io.on('connection', (socket) => {
                 }
             }
             delete game.players[socket.id];
-            game.playerCount--;
+            
+            if (game.gameState === 'LOBBY') {
+                ensureAIPlayerInLobby(game);
+            } else {
+                game.playerCount = Object.keys(game.players).length;
+            }
 
             if (socket.id === game.hostId) { 
-                const newHostSocket = Object.keys(game.players)[0];
-                game.hostId = newHostSocket || null;
+                const humanSockets = Object.keys(game.players).filter(sid => !sid.startsWith('ai-socket-opponent'));
+                game.hostId = humanSockets[0] || null;
             }
 
             if (game.gameState === 'LOBBY') {
-                 io.emit('lobby-update', { players: Object.values(game.players), settings: game.settings, hostPlayerId: game.players[game.hostId]?.id });
+                 io.emit('lobby-update', { players: getClientPlayersList(game.players), settings: game.settings, hostPlayerId: game.players[game.hostId]?.id });
             } else {
-                 io.emit('player-list-update', Object.values(game.players));
+                 io.emit('player-list-update', getClientPlayersList(game.players));
             }
         }
         
-        if (game.gameState === 'RUNNING' && game.playerCount < 2) {
+        const humanSocketsLeft = Object.keys(game.players).filter(sid => !sid.startsWith('ai-socket-opponent'));
+        if (game.gameState === 'RUNNING' && humanSocketsLeft.length < 1) {
             clearTimeout(game.gameInterval);
             io.emit('game-over', { winnerId: 'none', reason: 'Not enough players.' });
-            game = createNewGame();
+            resetGameToLobby(game);
         }
     });
 });
@@ -1214,6 +1544,8 @@ if (process.env.NODE_ENV === 'test') {
         updatePlayerVisibility,
         getPrunedClientState,
         paradoxHandler,
+        resetGameToLobby,
+        ensureAIPlayerInLobby,
         
         // Constants
         getBoardCols: () => BOARD_COLS,

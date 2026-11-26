@@ -24,9 +24,18 @@ window.onload = function() {
      * @param {number} duration - The duration of the effect in game steps.
      * @returns {number} The calculated cost in army units.
      */
-    function calculateFreezeCost(duration) { return Math.floor(15 * Math.pow(1.07, duration / 5)); }
-    function calculateOverclockCost(duration) { return Math.floor(20 * Math.pow(1.08, duration / 5)); }
-    function calculatePortalCost(duration) { return Math.floor(40 * Math.pow(1.06, duration / 5)); }
+    function calculateFreezeCost(duration) {
+        const base = (localGameState.settings && localGameState.settings.costFreezeBase) ? localGameState.settings.costFreezeBase : 15;
+        return Math.floor(base * Math.pow(1.07, duration / 5));
+    }
+    function calculateOverclockCost(duration) {
+        const base = (localGameState.settings && localGameState.settings.costOverclockBase) ? localGameState.settings.costOverclockBase : 20;
+        return Math.floor(base * Math.pow(1.08, duration / 5));
+    }
+    function calculatePortalCost(duration) {
+        const base = (localGameState.settings && localGameState.settings.costPortalBase) ? localGameState.settings.costPortalBase : 40;
+        return Math.floor(base * Math.pow(1.06, duration / 5));
+    }
     const COST_CALCULATORS = { FREEZE: calculateFreezeCost, OVERCLOCK: calculateOverclockCost, HOP: calculatePortalCost };
 
     /**
@@ -50,6 +59,7 @@ window.onload = function() {
     let isReady = false;
     let isHost = false;
     let players = [];
+    let currentHostPlayerId = null;
     
     // --- UI and Interaction State ---
     let lastServerUpdate = performance.now();
@@ -65,6 +75,17 @@ window.onload = function() {
     let isMouseOverTree = false;
     let historyPreviewState = { timelineId: null, step: null, gameState: null };
     let scrubberState = { active: false, timelineId: null };
+    let devMode = false;
+    let hasRetired = false;
+    
+    // Konami Code Gateway for Developer Features
+    const KONAMI_CODE = ['ArrowUp', 'ArrowUp', 'ArrowDown', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'ArrowLeft', 'ArrowRight', 'b', 'a'];
+    let konamiIndex = 0;
+
+    // --- 5D Visual Effects State ---
+    let lastTimelineSteps = {};
+    let rollbackEffectTimer = 0;
+    const temporalParticles = [];
 
     // Game Camera
     const camera = { x: 0, y: 0, zoom: 1.0, minZoom: 0.3, maxZoom: 3.0 };
@@ -88,7 +109,36 @@ window.onload = function() {
     const timelineControls = document.getElementById('timeline-controls');
     const timelineListContainer = document.getElementById('timeline-list-container');
     const customizationContainer = document.getElementById('customization-container');
-    const allCustomizationInputs = [document.getElementById('fogToggle'), document.getElementById('staggeredStartToggle'), document.getElementById('fairGeneralsToggle'), document.getElementById('mountainPercent'), document.getElementById('forestPercent'), document.getElementById('cityCount'), document.getElementById('maxMovingArmies')];
+    const allCustomizationInputs = [
+        document.getElementById('fogToggle'),
+        document.getElementById('staggeredStartToggle'),
+        document.getElementById('fairGeneralsToggle'),
+        document.getElementById('mountainPercent'),
+        document.getElementById('forestPercent'),
+        document.getElementById('cityCount'),
+        document.getElementById('maxMovingArmies'),
+        document.getElementById('gameTickMs'),
+        document.getElementById('sightRadius'),
+        document.getElementById('costSplitBase'),
+        document.getElementById('costFreezeBase'),
+        document.getElementById('costOverclockBase'),
+        document.getElementById('costPortalBase'),
+        document.getElementById('costAnchorBase'),
+        document.getElementById('aiWaitChance'),
+        document.getElementById('aiTokenIncome'),
+        document.getElementById('aiTokenCap'),
+        document.getElementById('aiFallibilityPercent'),
+        document.getElementById('aiGeneralThreatThreshold'),
+        document.getElementById('aiAttentionRadius'),
+        document.getElementById('aiAttentionShiftCooldown'),
+        document.getElementById('aiAlphaStrikeRatio'),
+        document.getElementById('aiAlphaStrikeThreshold'),
+        document.getElementById('aiWeightOffensive'),
+        document.getElementById('aiWeightDefensive'),
+        document.getElementById('aiWeightScouting'),
+        document.getElementById('aiWeightCooperative'),
+        document.getElementById('aiWeightTerritory')
+    ];
     
     const modalOverlay = document.getElementById('custom-modal-overlay');
     const modalTitle = document.getElementById('modal-title');
@@ -111,6 +161,8 @@ window.onload = function() {
      * @param {string} [config.cancelText='Cancel'] - The text for the cancel button.
      * @returns {Promise<string|boolean>} A promise that resolves with the input value if an input is shown, or `true` on confirmation. The promise rejects if the user cancels the action.
      */
+    const modalTextarea = document.getElementById('modal-textarea');
+
     function showModal(config) {
         modalTitle.textContent = config.title;
         modalMessage.textContent = config.message;
@@ -118,6 +170,14 @@ window.onload = function() {
         if (config.showInput) {
             modalInput.value = config.defaultValue || '';
             setTimeout(() => modalInput.focus(), 10);
+        }
+        if (modalTextarea) {
+            modalTextarea.classList.toggle('hidden', !config.showTextarea);
+            if (config.showTextarea) {
+                modalTextarea.value = config.defaultTextareaValue || '';
+                modalTextarea.readOnly = !!config.textareaReadOnly;
+                setTimeout(() => modalTextarea.focus(), 10);
+            }
         }
         modalCostDisplay.textContent = config.costText || '';
         modalCostDisplay.classList.toggle('hidden', !config.costText);
@@ -127,14 +187,20 @@ window.onload = function() {
         return new Promise((resolve, reject) => {
             const onConfirm = () => {
                 cleanup();
-                resolve(config.showInput ? modalInput.value : true);
+                if (config.showInput) {
+                    resolve(modalInput.value);
+                } else if (config.showTextarea) {
+                    resolve(modalTextarea.value);
+                } else {
+                    resolve(true);
+                }
             };
             const onCancel = () => {
                 cleanup();
                 reject();
             };
             const onKeyup = (e) => {
-                if(e.key === 'Enter' && !modalConfirmBtn.disabled) onConfirm();
+                if(e.key === 'Enter' && !modalConfirmBtn.disabled && !config.showTextarea) onConfirm();
                 if(e.key === 'Escape') onCancel();
             }
             function cleanup() {
@@ -161,6 +227,9 @@ window.onload = function() {
     function onPlayerAssignment(data) {
         myPlayerId = data.playerId;
         myColor = data.color;
+        if (currentHostPlayerId !== null) {
+            isHost = myPlayerId === currentHostPlayerId;
+        }
         const playerIdDisplay = document.getElementById('player-id-display');
         if (playerIdDisplay) {
             playerIdDisplay.textContent = `You are Player ${myPlayerId}`;
@@ -180,9 +249,47 @@ window.onload = function() {
         players = playerList;
         PLAYER_COLORS = { 0: '#333333' };
         players.forEach(p => { PLAYER_COLORS[p.id] = p.color; });
-        isHost = myPlayerId === hostPlayerId;
-        updatePlayerListView(hostPlayerId);
+        if (hostPlayerId !== undefined && hostPlayerId !== null) {
+            currentHostPlayerId = hostPlayerId;
+        }
+        isHost = myPlayerId === currentHostPlayerId;
+        updatePlayerListView(currentHostPlayerId);
         updateLobbyUI(settings);
+
+        const addAiBtn = document.getElementById('add-ai-btn');
+        if (addAiBtn) {
+            addAiBtn.classList.toggle('hidden', !isHost);
+        }
+
+        // Cleanly clear active game board and reset UI to pregame lobby
+        localGameState = {
+            multiverse: {},
+            portals: [],
+            paradoxEvents: [],
+            visibility: {},
+            boardDimensions: { cols: 40, rows: 30 },
+            playerStats: {},
+            settings: settings || {}
+        };
+
+        const statusDiv = document.getElementById('game-status');
+        if (statusDiv) statusDiv.innerText = "";
+        
+        readyBtn.style.display = 'block';
+        if (customizationContainer) customizationContainer.classList.remove('hidden');
+        if (timelineControls) timelineControls.classList.add('hidden');
+        if (timelineListContainer) timelineListContainer.classList.add('hidden');
+
+        const returnLobbyBtn = document.getElementById('return-lobby-btn');
+        if (returnLobbyBtn) returnLobbyBtn.classList.add('hidden');
+
+        const aiDebugContainer = document.getElementById('ai-debug-container');
+        if (aiDebugContainer) aiDebugContainer.classList.add('hidden');
+
+        isReady = false;
+        readyBtn.classList.remove('ready');
+        readyBtn.textContent = 'Ready Up';
+        hasRetired = false;
     }
     
     /**
@@ -199,8 +306,33 @@ window.onload = function() {
         // This is essential for a graceful fallback if the active timeline gets removed (e.g., due to an unravel event).
         const oldTimelineBeforeUpdate = localGameState.multiverse ? localGameState.multiverse[activeTimelineId] : null;
     
+        // Track gameStep reversals for Rollback visual rewind trigger
+        if (newState.multiverse) {
+            for (const timelineId in newState.multiverse) {
+                const timeline = newState.multiverse[timelineId];
+                const currentStep = timeline.currentState.gameStep;
+                const prevStep = lastTimelineSteps[timelineId];
+                if (prevStep !== undefined && currentStep < prevStep) {
+                    if (timelineId === activeTimelineId) {
+                        rollbackEffectTimer = 180; // Trigger scanline ripple (3 seconds)
+                    }
+                }
+                lastTimelineSteps[timelineId] = currentStep;
+            }
+        }
+
         // Immediately update the local game state. All subsequent logic MUST operate on this new state.
         localGameState = newState;
+
+        // Disallow slider adjustments by locking customization inputs while game is active
+        const isGameActive = localGameState.multiverse && Object.keys(localGameState.multiverse).length > 0;
+        if (isGameActive) {
+            allCustomizationInputs.forEach(input => {
+                if (input) input.disabled = true;
+            });
+            const importBtn = document.getElementById('import-config-btn');
+            if (importBtn) importBtn.disabled = true;
+        }
     
         // Now, validate the activeTimelineId against the new state.
         if (!localGameState.multiverse[activeTimelineId]) {
@@ -263,7 +395,14 @@ window.onload = function() {
         const splitBtn = document.getElementById('split-timeline-btn');
         if (splitBtn && localGameState.multiverse) {
             const numTimelines = Object.keys(localGameState.multiverse).length;
-            splitBtn.textContent = `Split Timeline (Cost: ${Math.floor(250 * Math.pow(1.25, numTimelines - 1))})`;
+            const splitBase = (localGameState.settings && localGameState.settings.costSplitBase !== undefined) ? localGameState.settings.costSplitBase : 250;
+            splitBtn.textContent = `Split Timeline (Cost: ${Math.floor(splitBase * Math.pow(1.25, numTimelines - 1))})`;
+        }
+
+        const anchorBtn = document.getElementById('anchor-timeline-btn');
+        if (anchorBtn && localGameState.settings) {
+            const anchorBase = localGameState.settings.costAnchorBase !== undefined ? localGameState.settings.costAnchorBase : 200;
+            anchorBtn.textContent = `Anchor Timeline (Cost: ${anchorBase})`;
         }
         
         // Handle staggered start UI visibility.
@@ -280,6 +419,36 @@ window.onload = function() {
             timelineControls.classList.remove('hidden');
             timelineListContainer.classList.remove('hidden');
         }
+
+        // Render AI thoughts if present in the state
+        const aiDebugContainer = document.getElementById('ai-debug-container');
+        const aiThoughtsList = document.getElementById('ai-thoughts-list');
+        if (aiDebugContainer && aiThoughtsList) {
+            if (devMode && newState.aiThoughts && newState.aiThoughts.length > 0) {
+                aiDebugContainer.classList.remove('hidden');
+                aiThoughtsList.innerHTML = newState.aiThoughts.map(t => `
+                    <div class="thought-item">
+                        <span class="thought-time">[${t.timestamp}]</span>
+                        <span class="thought-msg">${t.message}</span>
+                    </div>
+                `).join('');
+            } else {
+                aiDebugContainer.classList.add('hidden');
+            }
+        }
+
+        // Render Return to Lobby button for host if game is active or finished
+        const returnLobbyBtn = document.getElementById('return-lobby-btn');
+        if (returnLobbyBtn) {
+            const isGameActive = Object.keys(localGameState.multiverse).length > 0;
+            returnLobbyBtn.classList.toggle('hidden', !(isGameActive && isHost));
+        }
+
+        const retireAiBtn = document.getElementById('retire-ai-btn');
+        if (retireAiBtn) {
+            const isGameActive = Object.keys(localGameState.multiverse).length > 0;
+            retireAiBtn.classList.toggle('hidden', !(devMode && isGameActive && !hasRetired));
+        }
     }
 
     /**
@@ -294,6 +463,16 @@ window.onload = function() {
         isFogOfWarEnabled = settings.fogOfWar;
         previouslyVisibleEnemies = {};
         timelineAlerts = {};
+
+        const addAiBtn = document.getElementById('add-ai-btn');
+        if (addAiBtn) addAiBtn.classList.add('hidden');
+
+        // Lock customization inputs while the game is active
+        allCustomizationInputs.forEach(input => {
+            if (input) input.disabled = true;
+        });
+        const importBtn = document.getElementById('import-config-btn');
+        if (importBtn) importBtn.disabled = true;
     }
 
     /**
@@ -315,6 +494,9 @@ window.onload = function() {
         isReady = false;
         readyBtn.classList.remove('ready');
         readyBtn.textContent = 'Ready Up';
+
+        const returnLobbyBtn = document.getElementById('return-lobby-btn');
+        if (returnLobbyBtn) returnLobbyBtn.classList.add('hidden');
     }
 
     /**
@@ -403,24 +585,83 @@ window.onload = function() {
      * @param {number|null} hostPlayerId - The ID of the host player, to label them as "(Host)". Can be null if not in lobby.
      */
     function updatePlayerListView(hostPlayerId) {
-        const playerListElement = document.getElementById('player-list');
-        if (playerListElement) {
-            playerListElement.innerHTML = '<h3>Connected Players</h3>';
-            players.forEach(player => {
-                const playerEl = document.createElement('div');
-                const readyStatus = player.isReady ? '✔️ Ready' : '❌ Not Ready';
-                const hostLabel = player.id === hostPlayerId ? ' (Host)' : '';
-                let armyDisplay = '';
-                if (Object.keys(localGameState.multiverse).length > 0) {
-                    const armyCount = localGameState.playerStats?.[activeTimelineId]?.[player.id]?.army || 0;
-                    armyDisplay = `(Army: ${armyCount})`;
-                }
-                playerEl.textContent = `${player.name}${hostLabel} ${armyDisplay} - ${readyStatus}`;
-                playerEl.style.color = player.color;
-                playerEl.style.fontWeight = 'bold';
-                playerListElement.appendChild(playerEl);
-            });
+        if (hostPlayerId !== undefined && hostPlayerId !== null) {
+            currentHostPlayerId = hostPlayerId;
         }
+        const effectiveHostId = (hostPlayerId !== undefined && hostPlayerId !== null) ? hostPlayerId : currentHostPlayerId;
+
+        const playerListElement = document.getElementById('player-list');
+        if (!playerListElement) return;
+
+        playerListElement.innerHTML = '<h3>Connected Players</h3>';
+        
+        // Check if game is in lobby or running state
+        const isGameRunning = Object.keys(localGameState.multiverse).length > 0;
+
+        players.forEach(player => {
+            const playerEl = document.createElement('div');
+            playerEl.className = 'player-item-row';
+            playerEl.style.color = player.color;
+            playerEl.style.fontWeight = 'bold';
+
+            const playerInfoEl = document.createElement('span');
+            playerInfoEl.className = 'player-info';
+
+            const hostLabel = player.id === effectiveHostId ? ' (Host)' : '';
+            let armyDisplay = '';
+            if (isGameRunning) {
+                const armyCount = localGameState.playerStats?.[activeTimelineId]?.[player.id]?.army || 0;
+                armyDisplay = `(Army: ${armyCount})`;
+            }
+
+            if (player.isAI && !isGameRunning) {
+                // Lobby rendering for AI players
+                playerInfoEl.textContent = `${player.name}`;
+                playerEl.appendChild(playerInfoEl);
+
+                // Add controls container
+                const controlsEl = document.createElement('div');
+                controlsEl.className = 'ai-controls';
+
+                // Difficulty selector
+                const selectEl = document.createElement('select');
+                selectEl.className = 'ai-difficulty-select';
+                selectEl.disabled = !isHost;
+                
+                ['EASY', 'MEDIUM', 'HARD'].forEach(level => {
+                    const opt = document.createElement('option');
+                    opt.value = level;
+                    opt.textContent = level;
+                    if (player.difficulty === level) opt.selected = true;
+                    selectEl.appendChild(opt);
+                });
+
+                selectEl.addEventListener('change', () => {
+                    socket.emit('change-ai-difficulty', { aiSocketId: player.socketId, difficulty: selectEl.value });
+                });
+                controlsEl.appendChild(selectEl);
+
+                // Remove button
+                if (isHost) {
+                    const removeBtn = document.createElement('button');
+                    removeBtn.className = 'remove-ai-btn';
+                    removeBtn.textContent = 'Remove';
+                    removeBtn.addEventListener('click', () => {
+                        socket.emit('remove-ai-player', { aiSocketId: player.socketId });
+                    });
+                    controlsEl.appendChild(removeBtn);
+                }
+
+                playerEl.appendChild(controlsEl);
+            } else {
+                // Human player or running game rendering
+                const readyStatus = player.isReady ? '✔️ Ready' : '❌ Not Ready';
+                playerInfoEl.textContent = `${player.name}${hostLabel} ${armyDisplay} - ${readyStatus}`;
+                playerEl.appendChild(playerInfoEl);
+            }
+
+            playerListElement.appendChild(playerEl);
+        });
     }
 
     /**
@@ -429,16 +670,180 @@ window.onload = function() {
      * @param {object} settings - The current game settings object.
      */
     function updateLobbyUI(settings) {
-        allCustomizationInputs.forEach(input => input.disabled = !isHost);
-        allCustomizationInputs[0].checked = settings.fogOfWar;
-        allCustomizationInputs[1].checked = settings.staggeredStart;
-        allCustomizationInputs[2].checked = settings.fairGenerals;
-        allCustomizationInputs[3].value = settings.mountainPercent;
-        allCustomizationInputs[4].value = settings.forestPercent;
-        allCustomizationInputs[5].value = settings.cityCount;
-        allCustomizationInputs[6].value = settings.maxMovingArmies || 3;
+        const isGameActive = localGameState.multiverse && Object.keys(localGameState.multiverse).length > 0;
+        allCustomizationInputs.forEach(input => {
+            if (input) input.disabled = !isHost || isGameActive;
+        });
+        const importBtn = document.getElementById('import-config-btn');
+        if (importBtn) {
+            importBtn.disabled = !isHost || isGameActive;
+        }
+        setSettingsToUI(settings);
+    }
+
+    function getSettingsFromUI() {
+        return {
+            fogOfWar: document.getElementById('fogToggle').checked,
+            staggeredStart: document.getElementById('staggeredStartToggle').checked,
+            fairGenerals: document.getElementById('fairGeneralsToggle').checked,
+            mountainPercent: parseInt(document.getElementById('mountainPercent').value) || 0,
+            forestPercent: parseInt(document.getElementById('forestPercent').value) || 0,
+            cityCount: parseInt(document.getElementById('cityCount').value) || 0,
+            maxMovingArmies: parseInt(document.getElementById('maxMovingArmies').value) || 3,
+            gameTickMs: parseInt(document.getElementById('gameTickMs').value) || 125,
+            sightRadius: parseInt(document.getElementById('sightRadius').value) || 2,
+            costSplitBase: parseInt(document.getElementById('costSplitBase').value) || 250,
+            costFreezeBase: parseInt(document.getElementById('costFreezeBase').value) || 15,
+            costOverclockBase: parseInt(document.getElementById('costOverclockBase').value) || 20,
+            costPortalBase: parseInt(document.getElementById('costPortalBase').value) || 40,
+            costAnchorBase: parseInt(document.getElementById('costAnchorBase').value) || 200,
+            ai: {
+                waitChance: parseFloat(document.getElementById('aiWaitChance').value) !== undefined ? parseFloat(document.getElementById('aiWaitChance').value) : 0.08,
+                tokenIncome: parseInt(document.getElementById('aiTokenIncome').value) || 5,
+                tokenCap: parseInt(document.getElementById('aiTokenCap').value) || 50,
+                fallibilityPercent: parseFloat(document.getElementById('aiFallibilityPercent').value) !== undefined ? parseFloat(document.getElementById('aiFallibilityPercent').value) : 0.25,
+                generalThreatThreshold: parseInt(document.getElementById('aiGeneralThreatThreshold').value) || 300,
+                attentionRadius: parseInt(document.getElementById('aiAttentionRadius').value) || 6,
+                attentionShiftCooldown: parseInt(document.getElementById('aiAttentionShiftCooldown').value) || 15,
+                alphaStrikeRatio: parseFloat(document.getElementById('aiAlphaStrikeRatio').value) !== undefined ? parseFloat(document.getElementById('aiAlphaStrikeRatio').value) : 1.25,
+                alphaStrikeThreshold: parseInt(document.getElementById('aiAlphaStrikeThreshold').value) || 150,
+                weightOffensive: parseFloat(document.getElementById('aiWeightOffensive').value) !== undefined ? parseFloat(document.getElementById('aiWeightOffensive').value) : 1.0,
+                weightDefensive: parseFloat(document.getElementById('aiWeightDefensive').value) !== undefined ? parseFloat(document.getElementById('aiWeightDefensive').value) : 1.0,
+                weightScouting: parseFloat(document.getElementById('aiWeightScouting').value) !== undefined ? parseFloat(document.getElementById('aiWeightScouting').value) : 1.0,
+                weightCooperative: parseFloat(document.getElementById('aiWeightCooperative').value) !== undefined ? parseFloat(document.getElementById('aiWeightCooperative').value) : 1.0,
+                weightTerritory: parseFloat(document.getElementById('aiWeightTerritory').value) !== undefined ? parseFloat(document.getElementById('aiWeightTerritory').value) : 1.0
+            }
+        };
+    }
+
+    function setSettingsToUI(settings) {
+        if (!settings) return;
+        
+        const setVal = (id, val) => {
+            const el = document.getElementById(id);
+            if (el) {
+                if (el.type === 'checkbox') {
+                    el.checked = !!val;
+                } else {
+                    el.value = val;
+                }
+                const valEl = document.getElementById(id + 'Val');
+                if (valEl) {
+                    if (id === 'aiFallibilityPercent') {
+                        valEl.textContent = Math.round(val * 100);
+                    } else {
+                        valEl.textContent = val;
+                    }
+                }
+            }
+        };
+
+        setVal('fogToggle', settings.fogOfWar);
+        setVal('staggeredStartToggle', settings.staggeredStart);
+        setVal('fairGeneralsToggle', settings.fairGenerals);
+        setVal('mountainPercent', settings.mountainPercent !== undefined ? settings.mountainPercent : 10);
+        setVal('forestPercent', settings.forestPercent !== undefined ? settings.forestPercent : 15);
+        setVal('cityCount', settings.cityCount !== undefined ? settings.cityCount : 8);
+        setVal('maxMovingArmies', settings.maxMovingArmies !== undefined ? settings.maxMovingArmies : 3);
+        setVal('gameTickMs', settings.gameTickMs !== undefined ? settings.gameTickMs : 125);
+        setVal('sightRadius', settings.sightRadius !== undefined ? settings.sightRadius : 2);
+        setVal('costSplitBase', settings.costSplitBase !== undefined ? settings.costSplitBase : 250);
+        setVal('costFreezeBase', settings.costFreezeBase !== undefined ? settings.costFreezeBase : 15);
+        setVal('costOverclockBase', settings.costOverclockBase !== undefined ? settings.costOverclockBase : 20);
+        setVal('costPortalBase', settings.costPortalBase !== undefined ? settings.costPortalBase : 40);
+        setVal('costAnchorBase', settings.costAnchorBase !== undefined ? settings.costAnchorBase : 200);
+
+        if (settings.ai) {
+            setVal('aiWaitChance', settings.ai.waitChance !== undefined ? settings.ai.waitChance : 0.08);
+            setVal('aiTokenIncome', settings.ai.tokenIncome !== undefined ? settings.ai.tokenIncome : 5);
+            setVal('aiTokenCap', settings.ai.tokenCap !== undefined ? settings.ai.tokenCap : 50);
+            setVal('aiFallibilityPercent', settings.ai.fallibilityPercent !== undefined ? settings.ai.fallibilityPercent : 0.25);
+            setVal('aiGeneralThreatThreshold', settings.ai.generalThreatThreshold !== undefined ? settings.ai.generalThreatThreshold : 300);
+            setVal('aiAttentionRadius', settings.ai.attentionRadius !== undefined ? settings.ai.attentionRadius : 6);
+            setVal('aiAttentionShiftCooldown', settings.ai.attentionShiftCooldown !== undefined ? settings.ai.attentionShiftCooldown : 15);
+            setVal('aiAlphaStrikeRatio', settings.ai.alphaStrikeRatio !== undefined ? settings.ai.alphaStrikeRatio : 1.25);
+            setVal('aiAlphaStrikeThreshold', settings.ai.alphaStrikeThreshold !== undefined ? settings.ai.alphaStrikeThreshold : 150);
+            setVal('aiWeightOffensive', settings.ai.weightOffensive !== undefined ? settings.ai.weightOffensive : 1.0);
+            setVal('aiWeightDefensive', settings.ai.weightDefensive !== undefined ? settings.ai.weightDefensive : 1.0);
+            setVal('aiWeightScouting', settings.ai.weightScouting !== undefined ? settings.ai.weightScouting : 1.0);
+            setVal('aiWeightCooperative', settings.ai.weightCooperative !== undefined ? settings.ai.weightCooperative : 1.0);
+            setVal('aiWeightTerritory', settings.ai.weightTerritory !== undefined ? settings.ai.weightTerritory : 1.0);
+        }
     }
     
+    /**
+     * Determines whether dark or light text should be used against a given background color for maximum readability.
+     * Handles HSL, Hex, and RGB color formats.
+     * @param {string} colorStr - The background color string.
+     * @returns {string} High-contrast text color ('#111111' or '#FFFFFF').
+     */
+    function getContrastTextColor(colorStr) {
+        if (!colorStr) return '#FFFFFF';
+        if (colorStr.startsWith('hsl')) {
+            const match = colorStr.match(/hsla?\(\s*\d+\s*,\s*\d+%\s*,\s*(\d+)%\s*(?:,\s*[\d.]+\s*)?\)/i) ||
+                          colorStr.match(/hsla?\(\s*\d+\s*,\s*(\d+)%\s*,\s*(\d+)%\s*(?:,\s*[\d.]+\s*)?\)/i);
+            if (match) {
+                const lightness = parseInt(match[match.length - 1]);
+                return lightness > 50 ? '#111111' : '#FFFFFF';
+            }
+        }
+        if (colorStr.startsWith('#')) {
+            let hex = colorStr.slice(1);
+            if (hex.length === 3) {
+                hex = hex[0] + hex[0] + hex[1] + hex[1] + hex[2] + hex[2];
+            }
+            const r = parseInt(hex.slice(0, 2), 16);
+            const g = parseInt(hex.slice(2, 4), 16);
+            const b = parseInt(hex.slice(4, 6), 16);
+            const yiq = ((r * 299) + (g * 587) + (b * 114)) / 1000;
+            return yiq >= 128 ? '#111111' : '#FFFFFF';
+        }
+        if (colorStr.startsWith('rgb')) {
+            const match = colorStr.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*[\d.]+\s*)?\)/i);
+            if (match) {
+                const r = parseInt(match[1]);
+                const g = parseInt(match[2]);
+                const b = parseInt(match[3]);
+                const yiq = ((r * 299) + (g * 587) + (b * 114)) / 1000;
+                return yiq >= 128 ? '#111111' : '#FFFFFF';
+            }
+        }
+        return '#FFFFFF';
+    }
+
+    function updateAndDrawTemporalParticles(effectType) {
+        if (temporalParticles.length === 0) {
+            for (let i = 0; i < 20; i++) {
+                temporalParticles.push({
+                    x: Math.random() * canvas.width,
+                    y: Math.random() * canvas.height,
+                    speed: 0.5 + Math.random() * 1.5,
+                    size: 1 + Math.random() * 2,
+                    angle: Math.random() * Math.PI * 2
+                });
+            }
+        }
+        
+        ctx.fillStyle = effectType === 'FREEZE' ? 'rgba(0, 229, 255, 0.4)' : 'rgba(255, 85, 0, 0.4)';
+        for (const p of temporalParticles) {
+            if (effectType === 'FREEZE') {
+                p.y += p.speed;
+                p.x += Math.sin(p.angle) * 0.2;
+                p.angle += 0.02;
+                if (p.y > canvas.height) { p.y = 0; p.x = Math.random() * canvas.width; }
+            } else {
+                p.y -= p.speed;
+                p.x += Math.sin(p.angle) * 0.3;
+                p.angle += 0.03;
+                if (p.y < 0) { p.y = canvas.height; p.x = Math.random() * canvas.width; }
+            }
+            
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+
     /**
      * Calculates a color based on a causality tag's "age".
      * This is used to visually represent how "old" an army is relative to the current timeline's step,
@@ -523,7 +928,24 @@ window.onload = function() {
                 if (isPortal) { ctx.fillStyle = '#8A2BE2'; ctx.beginPath(); ctx.arc(x + TILE_SIZE * 0.75, y + TILE_SIZE * 0.25, TILE_SIZE / 5, 0, Math.PI * 2); ctx.fill(); }
                 
                 // --- Render Tile Decorators (General, City) ---
-                if (tile.type === TILE_TYPE.GENERAL) { ctx.fillStyle = '#490c3aff'; ctx.beginPath(); ctx.arc(x + TILE_SIZE / 2, y + TILE_SIZE / 2, TILE_SIZE / 4, 0, Math.PI * 2); ctx.fill(); }
+                if (tile.type === TILE_TYPE.GENERAL) {
+                    ctx.save();
+                    ctx.fillStyle = '#FFD700'; // Premium Bright Gold
+                    ctx.strokeStyle = '#000000'; // Dark outline
+                    ctx.lineWidth = 1;
+                    ctx.beginPath();
+                    ctx.moveTo(x + TILE_SIZE * 0.2, y + TILE_SIZE * 0.8);
+                    ctx.lineTo(x + TILE_SIZE * 0.8, y + TILE_SIZE * 0.8);
+                    ctx.lineTo(x + TILE_SIZE * 0.8, y + TILE_SIZE * 0.35);
+                    ctx.lineTo(x + TILE_SIZE * 0.65, y + TILE_SIZE * 0.55);
+                    ctx.lineTo(x + TILE_SIZE * 0.5, y + TILE_SIZE * 0.25);
+                    ctx.lineTo(x + TILE_SIZE * 0.35, y + TILE_SIZE * 0.55);
+                    ctx.lineTo(x + TILE_SIZE * 0.2, y + TILE_SIZE * 0.35);
+                    ctx.closePath();
+                    ctx.fill();
+                    ctx.stroke();
+                    ctx.restore();
+                }
                 else if (tile.type === TILE_TYPE.CITY) { ctx.strokeStyle = '#FFFFFF'; ctx.lineWidth = 2 / camera.zoom; ctx.strokeRect(x + 1, y + 1, TILE_SIZE - 3, TILE_SIZE - 3); }
                 
                 // --- Render Army Counts ---
@@ -531,10 +953,22 @@ window.onload = function() {
                     const isMyTile = tile.ownerId === myPlayerId;
                     const isArmyVisible = (tile.type !== TILE_TYPE.FOREST) || isMyTile;
                     if (isArmyVisible) {
-                        ctx.fillStyle = getCausalityColor(tile.causalityTag, activeGameState.gameStep);
+                        if (tile.type === TILE_TYPE.GENERAL) {
+                            ctx.fillStyle = '#FFFFFF'; // Crisp white text to display clearly over the crown
+                            ctx.strokeStyle = '#000000'; // Thin black outline
+                            ctx.lineWidth = 2.5;
+                        } else if (tile.causalityTag) {
+                            ctx.fillStyle = getCausalityColor(tile.causalityTag, activeGameState.gameStep);
+                        } else {
+                            const bgColor = PLAYER_COLORS[tile.ownerId] || '#FFFFFF';
+                            ctx.fillStyle = getContrastTextColor(bgColor);
+                        }
                         ctx.font = `bold ${TILE_SIZE / 2}px sans-serif`;
                         ctx.textAlign = 'center';
                         ctx.textBaseline = 'middle';
+                        if (tile.type === TILE_TYPE.GENERAL) {
+                            ctx.strokeText(tile.army, x + TILE_SIZE / 2, y + TILE_SIZE / 2);
+                        }
                         ctx.fillText(tile.army, x + TILE_SIZE / 2, y + TILE_SIZE / 2);
                     }
                 }
@@ -585,7 +1019,12 @@ window.onload = function() {
             ctx.stroke();
 
             if (camera.zoom > 0.5) {
-                ctx.fillStyle = getCausalityColor(move.causalityTag, activeGameState.gameStep);
+                if (move.causalityTag) {
+                    ctx.fillStyle = getCausalityColor(move.causalityTag, activeGameState.gameStep);
+                } else {
+                    const bgColor = PLAYER_COLORS[move.ownerId] || '#FFFFFF';
+                    ctx.fillStyle = getContrastTextColor(bgColor);
+                }
                 ctx.font = `bold ${TILE_SIZE / 2}px sans-serif`;
                 ctx.textAlign = 'center';
                 ctx.textBaseline = 'middle';
@@ -656,7 +1095,101 @@ window.onload = function() {
             ctx.strokeRect(x, y, TILE_SIZE, TILE_SIZE);
         }
 
+        // --- Render Developer Mode AI Attention Focus Circles ---
+        if (devMode && localGameState.aiFocusPoints) {
+            const aiSettings = (localGameState.settings && localGameState.settings.ai) ? localGameState.settings.ai : {};
+            const attentionRadius = aiSettings.attentionRadius !== undefined ? aiSettings.attentionRadius : 6;
+            
+            for (const aiPlayerId in localGameState.aiFocusPoints) {
+                const playerFocus = localGameState.aiFocusPoints[aiPlayerId];
+                const focalPoint = playerFocus[activeTimelineId];
+                if (focalPoint) {
+                    const centerX = focalPoint.col * TILE_SIZE + TILE_SIZE / 2;
+                    const centerY = focalPoint.row * TILE_SIZE + TILE_SIZE / 2;
+                    
+                    const color = PLAYER_COLORS[aiPlayerId] || '#FFC107';
+                    const radiusPx = (attentionRadius + 0.5) * TILE_SIZE;
+                    
+                    ctx.save();
+                    
+                    // Subtle radial backdrop overlay
+                    ctx.fillStyle = color;
+                    ctx.globalAlpha = 0.05;
+                    ctx.beginPath();
+                    ctx.arc(centerX, centerY, radiusPx, 0, Math.PI * 2);
+                    ctx.fill();
+                    
+                    // Dotted visual focus circle
+                    ctx.globalAlpha = 0.6;
+                    ctx.strokeStyle = color;
+                    ctx.lineWidth = 2 / camera.zoom;
+                    ctx.setLineDash([4, 4]);
+                    ctx.beginPath();
+                    ctx.arc(centerX, centerY, radiusPx, 0, Math.PI * 2);
+                    ctx.stroke();
+                    
+                    // Small central target dot
+                    ctx.globalAlpha = 0.8;
+                    ctx.fillStyle = color;
+                    ctx.beginPath();
+                    ctx.arc(centerX, centerY, 3, 0, Math.PI * 2);
+                    ctx.fill();
+                    
+                    ctx.restore();
+                }
+            }
+        }
+
         ctx.restore(); // Restore context to pre-camera state.
+
+        // Draw screenspace 5D overlays
+        if (currentTimeline) {
+            if (currentTimeline.isFrozen) {
+                // Freeze Overlay: Cyan edge vignette
+                const grad = ctx.createRadialGradient(canvas.width / 2, canvas.height / 2, canvas.width / 4, canvas.width / 2, canvas.height / 2, canvas.width / 2 * 1.3);
+                grad.addColorStop(0, 'rgba(0,0,0,0)');
+                grad.addColorStop(1, 'rgba(0, 229, 255, 0.15)');
+                ctx.fillStyle = grad;
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                updateAndDrawTemporalParticles('FREEZE');
+            } else if (currentTimeline.speedMultiplier > 1.0) {
+                // Overclock Overlay: Orange edge vignette
+                const grad = ctx.createRadialGradient(canvas.width / 2, canvas.height / 2, canvas.width / 4, canvas.width / 2, canvas.height / 2, canvas.width / 2 * 1.3);
+                grad.addColorStop(0, 'rgba(0,0,0,0)');
+                grad.addColorStop(1, 'rgba(255, 85, 0, 0.15)');
+                ctx.fillStyle = grad;
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                updateAndDrawTemporalParticles('OVERCLOCK');
+            }
+        }
+
+        if (rollbackEffectTimer > 0) {
+            rollbackEffectTimer--;
+            
+            const alphaRatio = rollbackEffectTimer / 180.0;
+            
+            // VHS rewind scanline sweeps
+            ctx.strokeStyle = `rgba(255, 255, 255, ${(0.08 + Math.random() * 0.12) * alphaRatio})`;
+            ctx.lineWidth = 1 + Math.random() * 2;
+            const numLines = 2 + Math.floor(Math.random() * 3);
+            for (let i = 0; i < numLines; i++) {
+                const lineY = Math.random() * canvas.height;
+                ctx.beginPath();
+                ctx.moveTo(0, lineY);
+                ctx.lineTo(canvas.width, lineY);
+                ctx.stroke();
+            }
+            
+            // Chromatic magenta noise overlay
+            ctx.fillStyle = `rgba(255, 0, 100, ${0.05 * alphaRatio})`;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            // Retro temporal HUD rewinding marker
+            ctx.fillStyle = `rgba(0, 255, 204, ${0.8 * alphaRatio})`;
+            ctx.font = 'bold 20px "Courier New", monospace';
+            ctx.textAlign = 'center';
+            ctx.fillText('◄◄ TEMPORAL REWIND ◄◄', canvas.width / 2, 45);
+        }
 
         // Render UI overlays.
         renderTimelineTree();
@@ -666,14 +1199,95 @@ window.onload = function() {
     /**
      * Renders the interactive timeline tree structure on its dedicated canvas.
      */
-    function renderTimelineTree() { const PADDING = 20; const X_SPACING = 50; const Y_SCALE = 0.5; treeCtx.clearRect(0, 0, treeCanvas.width, treeCanvas.height); treeCtx.save(); if (!localGameState.multiverse || Object.keys(localGameState.multiverse).length === 0) { treeCtx.restore(); return; } timelineTreeHitboxes = []; const t = {}; const l = {}; function a(id, L) { if (l[id] !== undefined) return; l[id] = L; Object.values(localGameState.multiverse).forEach(c => { if (c.parentId === id) a(c.id, L + 1); }); } a('timeline-alpha', 0); Object.keys(l).forEach(id => { const L = l[id]; t[id] = { x: PADDING + L * X_SPACING }; }); const A = localGameState.multiverse['timeline-alpha']; if (A) { const y = PADDING + A.currentState.gameStep * Y_SCALE; treeCamera.targetY = y - (treeCanvas.height / 2); } if (!isMouseOverTree) { treeCamera.y += (treeCamera.targetY - treeCamera.y) * 0.05; } treeCtx.translate(0, -treeCamera.y); treeCtx.fillStyle = '#FFFFFF'; treeCtx.strokeStyle = '#FFFFFF'; treeCtx.font = '12px "Courier New", monospace'; for (const id in localGameState.multiverse) { const m = localGameState.multiverse[id]; const p = t[id]; if (!p) continue; const sY = PADDING + m.splitStep * Y_SCALE; const eY = PADDING + m.currentState.gameStep * Y_SCALE; const top = Math.min(sY, eY); const bot = Math.max(sY, eY); if (bot < treeCamera.y - PADDING || top > treeCamera.y + treeCanvas.height + PADDING) continue; treeCtx.beginPath(); treeCtx.moveTo(p.x, sY); treeCtx.lineTo(p.x, eY); treeCtx.lineWidth = m.id === activeTimelineId ? 4 : 2; treeCtx.strokeStyle = m.isUnravelling ? '#FF00FF' : '#FFFFFF'; treeCtx.stroke(); if (m.parentId && t[m.parentId]) { const P = t[m.parentId]; treeCtx.beginPath(); treeCtx.moveTo(P.x, sY); treeCtx.lineTo(p.x, sY); treeCtx.lineWidth = 1; treeCtx.strokeStyle = '#888888'; treeCtx.stroke(); } treeCtx.beginPath(); treeCtx.arc(p.x, eY, 5, 0, Math.PI * 2); let nC = m.id === activeTimelineId ? '#007bff' : '#FFFFFF'; if (timelineAlerts[id]) { const S = Date.now() - timelineAlerts[id]; if (S > 5000) { delete timelineAlerts[id]; } else if (Math.floor(S / 250) % 2 === 0) { nC = '#FF0000'; } } treeCtx.fillStyle = nC; treeCtx.fill(); timelineTreeHitboxes.push({ id: id, x: p.x, y: eY, startY: sY, radius: 10 }); const d = id.split('-'); const D = d[1] || '???'; treeCtx.fillStyle = '#FFFFFF'; treeCtx.fillText(D, p.x + 10, eY + 4); } if (hoveredTimelineId && t[hoveredTimelineId]) { const T = localGameState.multiverse[hoveredTimelineId]; const p = t[hoveredTimelineId]; const eY = PADDING + T.currentState.gameStep * Y_SCALE; const txt = hoveredTimelineId; const m = treeCtx.measureText(txt); const w = m.width + 10; const h = 18; const bX = p.x + 15; const bY = eY - (h / 2); treeCtx.fillStyle = 'rgba(0, 0, 0, 0.8)'; treeCtx.fillRect(bX, bY, w, h); treeCtx.strokeStyle = '#007bff'; treeCtx.strokeRect(bX, bY, w, h); treeCtx.fillStyle = '#FFFFFF'; treeCtx.textAlign = 'left'; treeCtx.textBaseline = 'middle'; treeCtx.fillText(txt, bX + 5, bY + h / 2); } treeCtx.restore(); }
+    function renderTimelineTree() { const PADDING = 20; const X_SPACING = 50; const Y_SCALE = 0.5; treeCtx.clearRect(0, 0, treeCanvas.width, treeCanvas.height); treeCtx.save(); if (!localGameState.multiverse || Object.keys(localGameState.multiverse).length === 0) { treeCtx.restore(); return; } timelineTreeHitboxes = []; const t = {}; const l = {}; function a(id, L) { if (l[id] !== undefined) return; l[id] = L; Object.values(localGameState.multiverse).forEach(c => { if (c.parentId === id) a(c.id, L + 1); }); } a('timeline-alpha', 0); Object.keys(l).forEach(id => { const L = l[id]; t[id] = { x: PADDING + L * X_SPACING }; }); const A = localGameState.multiverse['timeline-alpha']; if (A) { const y = PADDING + A.currentState.gameStep * Y_SCALE; treeCamera.targetY = y - (treeCanvas.height / 2); } if (!isMouseOverTree) { treeCamera.y += (treeCamera.targetY - treeCamera.y) * 0.05; } treeCtx.translate(0, -treeCamera.y); treeCtx.fillStyle = '#FFFFFF'; treeCtx.strokeStyle = '#FFFFFF'; treeCtx.font = '12px "Courier New", monospace'; for (const id in localGameState.multiverse) { const m = localGameState.multiverse[id]; const p = t[id]; if (!p) continue; const sY = PADDING + m.splitStep * Y_SCALE; const eY = PADDING + m.currentState.gameStep * Y_SCALE; const top = Math.min(sY, eY); const bot = Math.max(sY, eY); if (bot < treeCamera.y - PADDING || top > treeCamera.y + treeCanvas.height + PADDING) continue; treeCtx.beginPath(); treeCtx.moveTo(p.x, sY); treeCtx.lineTo(p.x, eY); treeCtx.lineWidth = m.id === activeTimelineId ? 4 : 2; let strokeColor = '#FFFFFF'; if (m.isUnravelling) { strokeColor = '#FF00FF'; } else if (m.isFrozen) { strokeColor = '#00E5FF'; } else if (m.speedMultiplier > 1.0) { const pulse = Math.floor(Date.now() / 250) % 2 === 0; strokeColor = pulse ? '#FF9100' : '#FFD600'; } treeCtx.strokeStyle = strokeColor; treeCtx.stroke(); if (m.parentId && t[m.parentId]) { const P = t[m.parentId]; treeCtx.beginPath(); treeCtx.moveTo(P.x, sY); treeCtx.lineTo(p.x, sY); treeCtx.lineWidth = 1; treeCtx.strokeStyle = '#888888'; treeCtx.stroke(); } treeCtx.beginPath(); treeCtx.arc(p.x, eY, 5, 0, Math.PI * 2); let nC = m.id === activeTimelineId ? '#007bff' : '#FFFFFF'; if (timelineAlerts[id]) { const S = Date.now() - timelineAlerts[id]; if (S > 5000) { delete timelineAlerts[id]; } else if (Math.floor(S / 250) % 2 === 0) { nC = '#FF0000'; } } treeCtx.fillStyle = nC; treeCtx.fill(); timelineTreeHitboxes.push({ id: id, x: p.x, y: eY, startY: sY, radius: 10 }); const d = id.split('-'); const D = d[1] || '???'; treeCtx.fillStyle = '#FFFFFF'; treeCtx.fillText(D, p.x + 10, eY + 4); } if (hoveredTimelineId && t[hoveredTimelineId]) { const T = localGameState.multiverse[hoveredTimelineId]; const p = t[hoveredTimelineId]; const eY = PADDING + T.currentState.gameStep * Y_SCALE; const txt = hoveredTimelineId; const m = treeCtx.measureText(txt); const w = m.width + 10; const h = 18; const bX = p.x + 15; const bY = eY - (h / 2); treeCtx.fillStyle = 'rgba(0, 0, 0, 0.8)'; treeCtx.fillRect(bX, bY, w, h); treeCtx.strokeStyle = '#007bff'; treeCtx.strokeRect(bX, bY, w, h); treeCtx.fillStyle = '#FFFFFF'; treeCtx.textAlign = 'left'; treeCtx.textBaseline = 'middle'; treeCtx.fillText(txt, bX + 5, bY + h / 2); } treeCtx.restore(); }
     
     /**
      * A client-side simulation of a single game tick. Used for reconstructing historical game states for the history preview feature.
      * This must stay in sync with the server's primary game logic.
      * @param {object} gameState - The game state object to advance by one step.
      */
-    function client_runSingleTickLogic(gameState) { for (let i = gameState.moves.length - 1; i >= 0; i--) { const m = gameState.moves[i]; m.progress++; if (m.progress >= MOVE_TICKS) { m.progress = 0; const f = m.pathIndex >= m.path.length - 2; if (f) { const a = m.path[m.pathIndex + 1]; const t = gameState.board[a.row][a.col]; if (t.ownerId !== m.ownerId) { if (m.army > t.army) { t.ownerId = m.ownerId; t.army = m.army - t.army; } else { t.army -= m.army; } } else { t.army += m.army; } gameState.moves.splice(i, 1); } else { m.pathIndex++; } } } gameState.gameStep++; for (let r = 0; r < localGameState.boardDimensions.rows; r++) { for (let c = 0; c < localGameState.boardDimensions.cols; c++) { const t = gameState.board[r][c]; if (t.ownerId !== 0) { if ((t.type === TILE_TYPE.GENERAL || t.type === TILE_TYPE.CITY) && gameState.gameStep % 4 === 0) t.army++; else if ((t.type === TILE_TYPE.EMPTY || t.type === TILE_TYPE.FOREST) && gameState.gameStep % 20 === 0) t.army++; } } } }
+    function client_runSingleTickLogic(gameState) {
+        for (let i = gameState.moves.length - 1; i >= 0; i--) {
+            const m = gameState.moves[i];
+            m.progress++;
+            if (m.progress >= MOVE_TICKS) {
+                m.progress = 0;
+                
+                const currentPos = m.path[m.pathIndex];
+                const nextPos = m.path[m.pathIndex + 1];
+                if (!nextPos) {
+                    gameState.moves.splice(i, 1);
+                    continue;
+                }
+                
+                // Head-on Collision Check
+                let moveDestroyed = false;
+                for (let j = 0; j < gameState.moves.length; j++) {
+                    const other = gameState.moves[j];
+                    if (other === m || other.ownerId === m.ownerId) continue;
+                    
+                    const otherCurrentPos = other.path[other.pathIndex];
+                    const otherNextPos = other.path[other.pathIndex + 1];
+                    
+                    if (otherCurrentPos && otherNextPos &&
+                        otherCurrentPos.row === nextPos.row &&
+                        otherCurrentPos.col === nextPos.col &&
+                        otherNextPos.row === currentPos.row &&
+                        otherNextPos.col === currentPos.col) {
+                        
+                        if (m.army > other.army) {
+                            m.army -= other.army;
+                            gameState.moves.splice(j, 1);
+                            if (j < i) i--;
+                        } else if (other.army > m.army) {
+                            other.army -= m.army;
+                            gameState.moves.splice(i, 1);
+                            moveDestroyed = true;
+                            break;
+                        } else {
+                            gameState.moves.splice(Math.max(i, j), 1);
+                            gameState.moves.splice(Math.min(i, j), 1);
+                            if (Math.min(i, j) < i) i--;
+                            moveDestroyed = true;
+                            break;
+                        }
+                    }
+                }
+                if (moveDestroyed) continue;
+                
+                const f = m.pathIndex >= m.path.length - 2;
+                if (f) {
+                    const t = gameState.board[nextPos.row][nextPos.col];
+                    if (t.ownerId !== m.ownerId) {
+                        if (m.army > t.army) {
+                            t.ownerId = m.ownerId;
+                            t.army = m.army - t.army;
+                        } else {
+                            t.army -= m.army;
+                        }
+                    } else {
+                        t.army += m.army;
+                    }
+                    gameState.moves.splice(i, 1);
+                } else {
+                    m.pathIndex++;
+                }
+            }
+        }
+        gameState.gameStep++;
+        for (let r = 0; r < localGameState.boardDimensions.rows; r++) {
+            for (let c = 0; c < localGameState.boardDimensions.cols; c++) {
+                const t = gameState.board[r][c];
+                if (t.ownerId !== 0) {
+                    if ((t.type === TILE_TYPE.GENERAL || t.type === TILE_TYPE.CITY) && gameState.gameStep % 4 === 0) {
+                        t.army++;
+                    } else if ((t.type === TILE_TYPE.EMPTY || t.type === TILE_TYPE.FOREST) && gameState.gameStep % 20 === 0) {
+                        t.army++;
+                    }
+                }
+            }
+        }
+    }
     
     /**
      * Reconstructs a game state at a specific step in the past by starting from the nearest preceding keyframe and simulating forward.
@@ -725,6 +1339,35 @@ window.onload = function() {
     function handleWheel(event) { event.preventDefault(); const r = canvas.getBoundingClientRect(); const mX = event.clientX - r.left; const mY = event.clientY - r.top; const wX = (mX - camera.x) / camera.zoom; const wY = (mY - camera.y) / camera.zoom; const z = event.deltaY > 0 ? 0.9 : 1.1; const nZ = Math.max(camera.minZoom, Math.min(camera.maxZoom, camera.zoom * z)); camera.x = mX - wX * nZ; camera.y = mY - wY * nZ; camera.zoom = nZ; }
     function handleReadyButtonClick() { isReady = !isReady; socket.emit('player-ready', isReady); if (isReady) { readyBtn.textContent = 'Unready'; readyBtn.classList.add('ready'); } else { readyBtn.textContent = 'Ready Up'; readyBtn.classList.remove('ready'); } }
     function handleKeyDown(event) {
+        // Check for Konami Code key match
+        const expectedKey = KONAMI_CODE[konamiIndex];
+        const pressedKey = event.key.toLowerCase() === 'b' || event.key.toLowerCase() === 'a' ? event.key.toLowerCase() : event.key;
+        
+        if (pressedKey === expectedKey) {
+            konamiIndex++;
+            if (konamiIndex === KONAMI_CODE.length) {
+                konamiIndex = 0;
+                // Reveal the developer panel!
+                const devPanel = document.querySelector('.developer-panel');
+                if (devPanel) {
+                    devPanel.classList.remove('hidden');
+                    // Automatically toggle it on!
+                    const devModeToggle = document.getElementById('devModeToggle');
+                    if (devModeToggle) {
+                        devModeToggle.checked = true;
+                        devModeToggle.dispatchEvent(new Event('change'));
+                    }
+                    showModal({
+                        title: 'Developer Mode Unlocked!',
+                        message: 'Cheat Code Activated: Developer Mode features have been unlocked and enabled.'
+                    }).catch(() => {});
+                }
+            }
+        } else {
+            // Reset sequence if a wrong key is pressed, but allow restarting from the first key
+            konamiIndex = pressedKey === KONAMI_CODE[0] ? 1 : 0;
+        }
+
         if (!modalOverlay.classList.contains('hidden')) return;
 
         // Cycle timelines with Q and E
@@ -834,7 +1477,10 @@ window.onload = function() {
     function handleTimelineTreeMouseOver() { isMouseOverTree = true; }
     function handleTimelineTreeMouseOut() { isMouseOverTree = false; hoveredTimelineId = null; }
     function handleTimelineTreeWheel(event) { if (isMouseOverTree) { event.preventDefault(); treeCamera.y += event.deltaY * 0.5; } }
-    function emitSettingsChange() { if (!isHost) return; const n = { fogOfWar: allCustomizationInputs[0].checked, staggeredStart: allCustomizationInputs[1].checked, fairGenerals: allCustomizationInputs[2].checked, mountainPercent: allCustomizationInputs[3].value, forestPercent: allCustomizationInputs[4].value, cityCount: allCustomizationInputs[5].value, maxMovingArmies: allCustomizationInputs[6].value }; socket.emit('update-game-settings', n); }
+    function emitSettingsChange() {
+        if (!isHost) return;
+        socket.emit('update-game-settings', getSettingsFromUI());
+    }
     function handleSplitTimelineClick() { socket.emit('player-action', { type: 'SPLIT', activeTimelineId: activeTimelineId }); }
     function handleRollbackTimelineClick() { const c = localGameState.multiverse[activeTimelineId]?.currentState.gameStep; if (!c) return; socket.emit('get-rollback-info', { activeTimelineId }); }
     function handleAnchorTimelineClick() { socket.emit('player-action', { type: 'ANCHOR', activeTimelineId: activeTimelineId }); }
@@ -858,13 +1504,200 @@ window.onload = function() {
     treeCanvas.addEventListener('mouseover', handleTimelineTreeMouseOver);
     treeCanvas.addEventListener('mouseout', handleTimelineTreeMouseOut);
     treeCanvas.addEventListener('wheel', handleTimelineTreeWheel, { passive: false });
-    allCustomizationInputs.forEach(i => i.addEventListener('change', emitSettingsChange));
+    const rangeInputIds = ['mountainPercent', 'forestPercent', 'cityCount', 'maxMovingArmies', 'gameTickMs', 'sightRadius', 'costSplitBase', 'costFreezeBase', 'costOverclockBase', 'costPortalBase', 'costAnchorBase', 'aiWaitChance', 'aiTokenIncome', 'aiTokenCap', 'aiFallibilityPercent', 'aiGeneralThreatThreshold', 'aiAttentionRadius', 'aiAttentionShiftCooldown', 'aiAlphaStrikeRatio', 'aiAlphaStrikeThreshold', 'aiWeightOffensive', 'aiWeightDefensive', 'aiWeightScouting', 'aiWeightCooperative', 'aiWeightTerritory'];
+    
+    rangeInputIds.forEach(id => {
+        const el = document.getElementById(id);
+        if (el) {
+            el.addEventListener('input', () => {
+                const valEl = document.getElementById(id + 'Val');
+                if (valEl) {
+                    if (id === 'aiFallibilityPercent') {
+                        valEl.textContent = Math.round(parseFloat(el.value) * 100);
+                    } else {
+                        valEl.textContent = el.value;
+                    }
+                }
+            });
+        }
+    });
+
+    ['fogToggle', 'staggeredStartToggle', 'fairGeneralsToggle'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) {
+            el.addEventListener('change', () => {
+                if (isHost && localGameState.multiverse && Object.keys(localGameState.multiverse).length === 0) {
+                    emitSettingsChange();
+                }
+            });
+        }
+    });
+
+    const importConfigBtn = document.getElementById('import-config-btn');
+    const exportConfigBtn = document.getElementById('export-config-btn');
+    const configFileFileInput = document.getElementById('config-file-input');
+
+    if (exportConfigBtn) {
+        exportConfigBtn.addEventListener('click', () => {
+            const settingsStr = JSON.stringify(localGameState.settings || getSettingsFromUI(), null, 4);
+            
+            const downloadConfig = () => {
+                const blob = new Blob([settingsStr], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'dominion-config.json';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+            };
+
+            showModal({
+                title: 'Export Configuration',
+                message: 'Copy the JSON string below or download the config file directly:',
+                showTextarea: true,
+                defaultTextareaValue: settingsStr,
+                textareaReadOnly: true,
+                confirmText: 'Copy to Clipboard',
+                cancelText: 'Download File'
+            }).then(() => {
+                navigator.clipboard.writeText(settingsStr)
+                    .then(() => {
+                        showModal({ title: 'Success', message: 'Configuration copied to clipboard successfully!' });
+                    })
+                    .catch(() => {
+                        showModal({ title: 'Error', message: 'Failed to copy to clipboard.' });
+                    });
+            }).catch(() => {
+                downloadConfig();
+            });
+        });
+    }
+
+    if (importConfigBtn) {
+        importConfigBtn.addEventListener('click', () => {
+            if (!isHost) {
+                showModal({ title: 'Permission Denied', message: 'Only the host player can import configurations.' });
+                return;
+            }
+            const isGameActive = localGameState.multiverse && Object.keys(localGameState.multiverse).length > 0;
+            if (isGameActive) {
+                showModal({ title: 'Forbidden', message: 'Configurations cannot be imported while a game is active.' });
+                return;
+            }
+            
+            showModal({
+                title: 'Import Configuration',
+                message: 'Paste your serialized configuration JSON string below, or cancel to select a configuration file from your computer:',
+                showTextarea: true,
+                defaultTextareaValue: '',
+                confirmText: 'Import String',
+                cancelText: 'Upload File'
+            }).then((pastedValue) => {
+                if (!pastedValue || pastedValue.trim() === '') {
+                    showModal({ title: 'Error', message: 'Empty configuration string.' });
+                    return;
+                }
+                try {
+                    const parsed = JSON.parse(pastedValue);
+                    applyImportedSettings(parsed);
+                } catch (e) {
+                    showModal({ title: 'Invalid JSON', message: 'The pasted text is not a valid JSON structure.' });
+                }
+            }).catch(() => {
+                if (configFileFileInput) {
+                    configFileFileInput.value = '';
+                    configFileFileInput.click();
+                }
+            });
+        });
+    }
+
+    if (configFileFileInput) {
+        configFileFileInput.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = (event) => {
+                try {
+                    const parsed = JSON.parse(event.target.result);
+                    applyImportedSettings(parsed);
+                } catch (err) {
+                    showModal({ title: 'Invalid File', message: 'The selected file is not a valid JSON structure.' });
+                }
+            };
+            reader.readAsText(file);
+        });
+    }
+
+    function applyImportedSettings(settings) {
+        if (!settings) return;
+        const requiredKeys = ['fogOfWar', 'mountainPercent', 'forestPercent', 'cityCount'];
+        const hasRequired = requiredKeys.every(k => k in settings);
+        
+        if (!hasRequired) {
+            showModal({ title: 'Import Failed', message: 'The uploaded JSON is missing core configuration keys.' });
+            return;
+        }
+
+        setSettingsToUI(settings);
+        emitSettingsChange();
+        showModal({ title: 'Success', message: 'Configuration successfully imported and applied!' });
+    }
+
+    allCustomizationInputs.forEach(i => {
+        if (i) i.addEventListener('change', emitSettingsChange);
+    });
     document.getElementById('split-timeline-btn').addEventListener('click', handleSplitTimelineClick);
     document.getElementById('rollback-timeline-btn').addEventListener('click', handleRollbackTimelineClick);
     document.getElementById('anchor-timeline-btn').addEventListener('click', handleAnchorTimelineClick);
     document.getElementById('freeze-timeline-btn').addEventListener('click', handleFreezeTimelineClick);
     document.getElementById('overclock-timeline-btn').addEventListener('click', handleOverclockTimelineClick);
     document.getElementById('hop-timeline-btn').addEventListener('click', handleHopTimelineClick);
+    document.getElementById('add-ai-btn').addEventListener('click', () => {
+        socket.emit('add-ai-player');
+    });
+    document.getElementById('return-lobby-btn').addEventListener('click', () => {
+        socket.emit('return-to-lobby');
+    });
+
+    const devModeToggle = document.getElementById('devModeToggle');
+    if (devModeToggle) {
+        devModeToggle.addEventListener('change', (e) => {
+            devMode = e.target.checked;
+            const aiDebugContainer = document.getElementById('ai-debug-container');
+            if (aiDebugContainer) {
+                if (!devMode) {
+                    aiDebugContainer.classList.add('hidden');
+                } else if (localGameState && localGameState.aiThoughts && localGameState.aiThoughts.length > 0) {
+                    devModeToggle.checked && aiDebugContainer.classList.remove('hidden');
+                }
+            }
+            const retireAiBtn = document.getElementById('retire-ai-btn');
+            if (retireAiBtn) {
+                const isGameActive = localGameState.multiverse && Object.keys(localGameState.multiverse).length > 0;
+                retireAiBtn.classList.toggle('hidden', !(devMode && isGameActive && !hasRetired));
+            }
+        });
+    }
+
+    const retireAiBtn = document.getElementById('retire-ai-btn');
+    if (retireAiBtn) {
+        retireAiBtn.addEventListener('click', () => {
+            showModal({
+                title: 'Retire to AI Control',
+                message: 'Are you sure you want to hand control of your General and armies over to the AI agent? You will become a spectator and can watch the game unfold.',
+                confirmText: 'Retire to AI',
+                cancelText: 'Cancel'
+            }).then(() => {
+                hasRetired = true;
+                retireAiBtn.classList.add('hidden');
+                socket.emit('player-retire-to-ai');
+            }).catch(() => {});
+        });
+    }
     
     /**
      * The main animation loop. Requests a new frame and calls the main render function.
