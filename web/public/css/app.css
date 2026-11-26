@@ -1,0 +1,107 @@
+/* Minimal styling for phase one. Phase two replaces this with Bootstrap. */
+:root {
+    --bg: #12141a;
+    --panel: #1c1f28;
+    --border: #2e3240;
+    --text: #e6e8ee;
+    --muted: #9aa0b0;
+    --accent: #5b8def;
+    --danger: #e0565b;
+    --ok: #3fb67a;
+}
+
+* { box-sizing: border-box; }
+
+body {
+    margin: 0;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.5;
+}
+
+a { color: var(--accent); }
+
+.topbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px 20px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+}
+.topbar nav { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; }
+.brand { font-weight: 700; font-size: 1.2rem; color: var(--text); text-decoration: none; }
+
+.container { max-width: 960px; margin: 0 auto; padding: 24px 16px; }
+
+.card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 16px;
+}
+
+.form { display: flex; flex-direction: column; gap: 6px; max-width: 420px; }
+.form label { margin-top: 10px; font-weight: 600; }
+.form button { margin-top: 16px; align-self: flex-start; }
+
+input, select, button, .button {
+    font: inherit;
+    padding: 8px 12px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: #0f1117;
+    color: var(--text);
+}
+button, .button {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+    cursor: pointer;
+    text-decoration: none;
+    display: inline-block;
+}
+button.secondary, .button.secondary { background: transparent; color: var(--text); border-color: var(--border); }
+button.danger, .button.danger { background: var(--danger); border-color: var(--danger); }
+button.link { background: none; border: none; color: var(--accent); padding: 0; }
+
+.inline { display: inline; }
+.actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+small, .muted, .note { color: var(--muted); }
+
+.flash { padding: 10px 14px; border-radius: 6px; margin-bottom: 16px; }
+.flash-success { background: rgba(63, 182, 122, .15); border: 1px solid var(--ok); }
+.flash-error { background: rgba(224, 86, 91, .15); border: 1px solid var(--danger); }
+.field-error { color: var(--danger); margin: 2px 0 0; font-size: .9rem; }
+
+.search { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+.search input[type="search"] { flex: 1 1 220px; }
+.checkbox { display: flex; gap: 6px; align-items: center; }
+
+.table-wrap { overflow-x: auto; }
+.table { width: 100%; border-collapse: collapse; margin-bottom: 16px; }
+.table th, .table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+.table th a { color: var(--text); text-decoration: none; }
+.row-actions a { margin-right: 10px; }
+
+.badge { background: #2a3350; border-radius: 4px; padding: 2px 8px; font-size: .85rem; }
+.status { font-size: .85rem; }
+.status-active, .status-lobby { color: var(--ok); }
+.status-disabled { color: var(--danger); }
+.status-running { color: #e8b04a; }
+
+.details { display: grid; grid-template-columns: max-content 1fr; gap: 6px 20px; }
+.details dt { color: var(--muted); }
+.details dd { margin: 0; }
+
+.pager { display: flex; gap: 10px; margin-bottom: 16px; }
+
+@media (max-width: 640px) {
+    .table thead { display: none; }
+    .table tr { display: block; border-bottom: 1px solid var(--border); padding: 8px 0; }
+    .table td { display: block; border: none; padding: 2px 0; }
+}
