@@ -3,6 +3,7 @@ const express = require('express');
 const http = require('http');
 const { Server } = require("socket.io");
 const path = require('path');
+const db = require('./db');
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
@@ -41,6 +42,126 @@ function generatePlayerColors(count) {
 }
 let PLAYER_COLORS = generatePlayerColors(MAX_PLAYERS);
 let game = createNewGame();
+
+// --- Multiple Games ---
+// Each match lives in its own object in `games`, keyed by id, with its own Socket.IO room.
+// The engine functions below were written for one global `game`, so every entry point
+// (socket handlers, timers) runs inside withGame(), which points `game` and the board
+// dimensions at the right match first. JavaScript runs each callback to completion,
+// so contexts never interleave.
+const games = new Map();
+let nextLocalGameId = 1;
+
+function withGame(targetGame, fn) {
+    const prev = { game, cols: BOARD_COLS, rows: BOARD_ROWS };
+    game = targetGame;
+    BOARD_COLS = targetGame.boardDimensions.cols;
+    BOARD_ROWS = targetGame.boardDimensions.rows;
+    try {
+        return fn();
+    } finally {
+        // initializeGame can resize the board; keep the match's own copy in step.
+        targetGame.boardDimensions = { cols: BOARD_COLS, rows: BOARD_ROWS };
+        game = prev.game;
+        BOARD_COLS = prev.cols;
+        BOARD_ROWS = prev.rows;
+    }
+}
+
+/**
+ * Send an event to everyone in the current match. Outside a match (unit tests) it broadcasts.
+ * Events that change what the site's game search shows also queue a database sync.
+ */
+function roomEmit(event, data) {
+    if (game && game.room) {
+        io.to(game.room).emit(event, data);
+        if (['lobby-update', 'game-start', 'game-over', 'player-list-update'].includes(event)) {
+            scheduleSync(game);
+        }
+    } else {
+        io.emit(event, data);
+    }
+}
+
+function humanSocketIds(g) {
+    return Object.keys(g.players).filter(sid => !sid.startsWith('ai-socket-opponent'));
+}
+
+/** Create a new match and register it (and its row in MySQL when connected). */
+async function createRegisteredGame(identity) {
+    const g = createNewGame();
+    g.name = identity.name ? `${identity.name}'s game` : 'Guest game';
+    g.lastHostName = identity.name || 'Guest';
+    g.dbId = await db.createGame({
+        name: g.name, hostUserId: identity.userId, hostName: g.lastHostName, maxPlayers: MAX_PLAYERS
+    });
+    g.id = g.dbId ?? `local-${nextLocalGameId++}`;
+    g.room = `game-${g.id}`;
+    games.set(String(g.id), g);
+    return g;
+}
+
+/** First match still in its lobby with room to spare, for players who didn't pick one. */
+function findOpenLobby() {
+    for (const g of games.values()) {
+        if (g.gameState === 'LOBBY' && humanSocketIds(g).length < MAX_PLAYERS) return g;
+    }
+    return null;
+}
+
+/** Remove an empty match. */
+function destroyGame(g) {
+    if (g.gameInterval) clearTimeout(g.gameInterval);
+    if (g.gameOverTimeout) clearTimeout(g.gameOverTimeout);
+    if (g.syncTimer) clearTimeout(g.syncTimer);
+    games.delete(String(g.id));
+    g.destroyed = true;
+    if (g.dbId) {
+        db.updateGame(g.dbId, {
+            status: 'finished', hostUserId: null, hostName: g.lastHostName || 'nobody', currentPlayers: 0,
+            cols: g.boardDimensions.cols, rows: g.boardDimensions.rows
+        });
+    }
+}
+
+/** Coalesce many changes in one tick into a single UPDATE of the games row. */
+function scheduleSync(g) {
+    if (!g.dbId || g.syncTimer || g.destroyed) return;
+    g.syncTimer = setTimeout(() => {
+        g.syncTimer = null;
+        if (g.destroyed) return;
+        const hostSocket = g.hostId ? io.sockets.sockets.get(g.hostId) : null;
+        const host = hostSocket?.data.identity;
+        if (host) g.lastHostName = host.name;
+        const status = { LOBBY: 'lobby', RUNNING: 'running', FINISHED: 'finished' }[g.gameState] || 'lobby';
+        db.updateGame(g.dbId, {
+            status,
+            hostUserId: host?.userId ?? null,
+            hostName: host?.name || g.lastHostName || 'nobody',
+            currentPlayers: Object.keys(g.players).length,
+            cols: status === 'lobby' ? null : g.boardDimensions.cols,
+            rows: status === 'lobby' ? null : g.boardDimensions.rows,
+        });
+    }, 0);
+}
+
+/** Registered players in a match that just started. */
+function recordMatchStart(g) {
+    if (!g.dbId) return;
+    for (const sid of humanSocketIds(g)) {
+        const userId = io.sockets.sockets.get(sid)?.data.identity?.userId;
+        if (userId) db.addPlayer(g.dbId, userId);
+    }
+}
+
+/** Results for registered players when a match ends. winnerId is a player number. */
+function recordMatchEnd(g, winnerId) {
+    if (!g.dbId) return;
+    for (const [sid, player] of Object.entries(g.players)) {
+        const userId = io.sockets.sockets.get(sid)?.data.identity?.userId;
+        if (userId) db.setResult(g.dbId, userId, player.id === winnerId ? 'won' : 'lost');
+    }
+}
 
 // --- Dynamic Cost Formulas (Server-side) ---
 function calculateFreezeCost(duration, base = 15) { return Math.floor(base * Math.pow(1.07, duration / 5)); }
@@ -222,7 +343,11 @@ function initializeGame(game) {
         unravelRadius: 0
     };
     game.gameState = 'RUNNING';
-    io.emit('game-start', { settings: game.settings });
+    // Remember how many started: playerCount drops as people leave, and a match that
+    // began with 2+ players must still end when only one is left.
+    game.startingPlayerCount = game.playerCount;
+    recordMatchStart(game);
+    roomEmit('game-start', { settings: game.settings });
 }
 
 /**
@@ -639,14 +764,17 @@ function gameLoop(game) {
     }
 
 
-    if (activePlayers.size <= 1 && game.playerCount > 1 && game.gameState === 'RUNNING') {
+    if (activePlayers.size <= 1 && Math.max(game.playerCount, game.startingPlayerCount || 0) > 1 && game.gameState === 'RUNNING') {
         const winnerId = activePlayers.values().next().value || "No one";
-        io.emit('game-over', { winnerId });
         clearTimeout(game.gameInterval);
         game.gameState = 'FINISHED';
+        recordMatchEnd(game, winnerId);
+        roomEmit('game-over', { winnerId });
 
         game.gameOverTimeout = setTimeout(() => {
-            resetGameToLobby(game);
+            if (game.destroyed) return;
+            if (game.room) withGame(game, () => resetGameToLobby(game));
+            else resetGameToLobby(game);
         }, 10000);
         return;
     }
@@ -1114,8 +1242,11 @@ function resetGameToLobby(game) {
     // Regenerate randomized golden ratio HSL player colors on lobby reset
     PLAYER_COLORS = generatePlayerColors(MAX_PLAYERS);
 
-    // Keep active human sockets
-    const connectedSockets = new Map(io.sockets.sockets);
+    // Keep the human sockets that are in this match (all sockets when there are no rooms, as in tests)
+    const roomMembers = game.room ? io.sockets.adapter.rooms.get(game.room) : null;
+    const connectedSockets = new Map(
+        [...io.sockets.sockets].filter(([sid]) => !game.room || (roomMembers && roomMembers.has(sid)))
+    );
     
     // Retain previous game settings
     const currentSettings = { ...game.settings };
@@ -1127,7 +1258,8 @@ function resetGameToLobby(game) {
     let i = 1;
     connectedSockets.forEach((socket, socketId) => {
         const color = PLAYER_COLORS[(i - 1) % PLAYER_COLORS.length];
-        newGame.players[socketId] = { id: i, name: `Player ${i}`, color: color, isReady: false };
+        const name = socket.data?.identity?.name || `Player ${i}`;
+        newGame.players[socketId] = { id: i, name, color: color, isReady: false };
         if (newGame.hostId === null) { newGame.hostId = socket.id; }
         socket.emit('player-assignment', { playerId: i, color: color });
         i++;
@@ -1147,7 +1279,7 @@ function resetGameToLobby(game) {
     ensureAIPlayerInLobby(game);
 
     const hostPlayerId = game.players[game.hostId]?.id;
-    io.emit('lobby-update', { players: getClientPlayersList(game.players), settings: game.settings, hostPlayerId });
+    roomEmit('lobby-update', { players: getClientPlayersList(game.players), settings: game.settings, hostPlayerId });
 }
 
 /**
@@ -1181,7 +1313,47 @@ function ensureAIPlayerInLobby(game) {
 }
 
 // --- Socket.IO Connection Handling ---
+// Who is connecting (ticket from the PHP site, or a guest) and which match they join.
+// Clients send { ticket, game, new } in the handshake auth.
+io.use(async (socket, next) => {
+    try {
+        const auth = socket.handshake.auth || {};
+        const user = await db.redeemTicket(auth.ticket);
+        socket.data.identity = user
+            ? { userId: user.userId, name: user.displayName || user.username }
+            : { userId: null, name: null }; // guests get "Guest N" once they have a player number
+
+        let target = null;
+        if (auth.game != null && auth.game !== '') {
+            target = games.get(String(auth.game)) || null;
+            if (!target) socket.data.missingGame = true;
+        }
+        if (!target && !auth.new) target = findOpenLobby();
+        if (!target) {
+            target = await createRegisteredGame(socket.data.identity);
+        }
+        socket.data.game = target;
+        next();
+    } catch (err) {
+        console.error('Connection setup failed:', err);
+        next(new Error('Could not join a game.'));
+    }
+});
+
 io.on('connection', (socket) => {
+    const myGame = socket.data.game;
+    socket.join(myGame.room);
+    // Run every handler for this socket against its own match.
+    const onGame = (event, fn) => socket.on(event, (...args) => {
+        if (myGame.destroyed) return;
+        withGame(myGame, () => fn(...args));
+    });
+    withGame(myGame, () => handleConnection(socket, onGame));
+    // A match nobody managed to join (e.g. the join was refused) shouldn't linger in search.
+    if (humanSocketIds(myGame).length === 0) destroyGame(myGame);
+});
+
+function handleConnection(socket, onGame) {
     const humanCount = Object.keys(game.players).filter(sid => !sid.startsWith('ai-socket-opponent')).length;
     if (humanCount >= MAX_PLAYERS || game.gameState === 'RUNNING') {
         socket.emit('game-in-progress');
@@ -1195,7 +1367,8 @@ io.on('connection', (socket) => {
 
     const playerId = humanCount + 1;
     const color = PLAYER_COLORS[(playerId - 1) % PLAYER_COLORS.length];
-    game.players[socket.id] = { id: playerId, name: `Player ${playerId}`, color: color, isReady: false };
+    if (!socket.data.identity.name) socket.data.identity.name = `Guest ${playerId}`;
+    game.players[socket.id] = { id: playerId, name: socket.data.identity.name, color: color, isReady: false };
 
     if (game.hostId === null) {
         game.hostId = socket.id;
@@ -1205,9 +1378,9 @@ io.on('connection', (socket) => {
 
     socket.emit('player-assignment', { playerId, color });
     const hostPlayerId = game.players[game.hostId]?.id;
-    io.emit('lobby-update', { players: getClientPlayersList(game.players), settings: game.settings, hostPlayerId });
+    roomEmit('lobby-update', { players: getClientPlayersList(game.players), settings: game.settings, hostPlayerId });
 
-    socket.on('update-game-settings', (newSettings) => {
+    onGame('update-game-settings', (newSettings) => {
         if (socket.id === game.hostId && game.gameState === 'LOBBY') {
             game.settings.fogOfWar = !!newSettings.fogOfWar;
             game.settings.staggeredStart = !!newSettings.staggeredStart;
@@ -1243,23 +1416,25 @@ io.on('connection', (socket) => {
                 game.settings.ai.weightCooperative = Math.max(0.0, Math.min(5.0, parseFloat(newSettings.ai.weightCooperative) !== undefined ? parseFloat(newSettings.ai.weightCooperative) : 1.0));
                 game.settings.ai.weightTerritory = Math.max(0.0, Math.min(5.0, parseFloat(newSettings.ai.weightTerritory) !== undefined ? parseFloat(newSettings.ai.weightTerritory) : 1.0));
             }
-            io.emit('lobby-update', { players: getClientPlayersList(game.players), settings: game.settings, hostPlayerId: game.players[game.hostId]?.id });
+            roomEmit('lobby-update', { players: getClientPlayersList(game.players), settings: game.settings, hostPlayerId: game.players[game.hostId]?.id });
         }
     });
 
-    socket.on('player-ready', (isReady) => {
+    onGame('player-ready', (isReady) => {
         if (game.gameState !== 'LOBBY') return;
         const player = game.players[socket.id];
         if (player) {
             player.isReady = isReady;
-            io.emit('lobby-update', { players: getClientPlayersList(game.players), settings: game.settings, hostPlayerId: game.players[game.hostId]?.id });
+            roomEmit('lobby-update', { players: getClientPlayersList(game.players), settings: game.settings, hostPlayerId: game.players[game.hostId]?.id });
 
             const allPlayers = Object.values(game.players);
             const allReady = allPlayers.length > 0 && allPlayers.every(p => p.isReady);
 
             if (allReady && allPlayers.length >= 1) {
                 initializeGame(game);
+                const thisGame = game;
                 const dynamicGameLoop = () => {
+                    if (thisGame.destroyed) return;
                     if (game.gameState !== 'RUNNING') return;
                     const activeTimelinesCount = Object.values(game.multiverse).filter(t => !t.isFrozen).length || 1;
                     const tickDuration = (game.settings.gameTickMs || 125) * activeTimelinesCount;
@@ -1303,7 +1478,7 @@ io.on('connection', (socket) => {
                         }
                     }
                     if (game.gameState === 'RUNNING') {
-                        game.gameInterval = setTimeout(dynamicGameLoop, tickDuration);
+                        game.gameInterval = setTimeout(() => withGame(thisGame, dynamicGameLoop), tickDuration);
                     }
                 };
                 dynamicGameLoop();
@@ -1311,7 +1486,7 @@ io.on('connection', (socket) => {
         }
     });
     
-    socket.on('get-rollback-info', ({ activeTimelineId }) => {
+    onGame('get-rollback-info', ({ activeTimelineId }) => {
         const player = game.players[socket.id];
         if (!player) return;
         const timeline = game.multiverse[activeTimelineId];
@@ -1340,7 +1515,7 @@ io.on('connection', (socket) => {
         socket.emit('rollback-info-response', { oldestAffordableStep });
     });
     
-    socket.on('get-affordability-info', ({ actionType, activeTimelineId }) => {
+    onGame('get-affordability-info', ({ actionType, activeTimelineId }) => {
         const player = game.players[socket.id];
         if (!player) return;
         const timeline = game.multiverse[activeTimelineId];
@@ -1368,7 +1543,7 @@ io.on('connection', (socket) => {
         socket.emit('affordability-info-response', { actionType, maxDuration });
     });
     
-    socket.on('player-action', (action) => {
+    onGame('player-action', (action) => {
         if (game.gameState !== 'RUNNING') return;
         const player = game.players[socket.id];
         if (!player) return;
@@ -1383,7 +1558,7 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('player-retire-to-ai', () => {
+    onGame('player-retire-to-ai', () => {
         if (game.gameState !== 'RUNNING') return;
         const player = game.players[socket.id];
         if (player && !player.isAI) {
@@ -1394,11 +1569,11 @@ io.on('connection', (socket) => {
             player.aiInstance.logThought(`[System] Human Player ${player.id} retired to AI control!`);
             
             const hostPlayerId = game.players[game.hostId]?.id;
-            io.emit('lobby-update', { players: getClientPlayersList(game.players), settings: game.settings, hostPlayerId });
+            roomEmit('lobby-update', { players: getClientPlayersList(game.players), settings: game.settings, hostPlayerId });
         }
     });
 
-    socket.on('add-ai-player', () => {
+    onGame('add-ai-player', () => {
         if (socket.id !== game.hostId || game.gameState !== 'LOBBY') return;
         
         const aiSocketId = `ai-socket-opponent-manual-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
@@ -1419,10 +1594,10 @@ io.on('connection', (socket) => {
         game.playerCount = Object.keys(game.players).length;
 
         const hostPlayerId = game.players[game.hostId]?.id;
-        io.emit('lobby-update', { players: getClientPlayersList(game.players), settings: game.settings, hostPlayerId });
+        roomEmit('lobby-update', { players: getClientPlayersList(game.players), settings: game.settings, hostPlayerId });
     });
 
-    socket.on('change-ai-difficulty', ({ aiSocketId, difficulty }) => {
+    onGame('change-ai-difficulty', ({ aiSocketId, difficulty }) => {
         if (socket.id !== game.hostId || game.gameState !== 'LOBBY') return;
         if (!['EASY', 'MEDIUM', 'HARD'].includes(difficulty)) return;
         
@@ -1434,11 +1609,11 @@ io.on('connection', (socket) => {
                 player.aiInstance.difficulty = difficulty;
             }
             const hostPlayerId = game.players[game.hostId]?.id;
-            io.emit('lobby-update', { players: getClientPlayersList(game.players), settings: game.settings, hostPlayerId });
+            roomEmit('lobby-update', { players: getClientPlayersList(game.players), settings: game.settings, hostPlayerId });
         }
     });
 
-    socket.on('remove-ai-player', ({ aiSocketId }) => {
+    onGame('remove-ai-player', ({ aiSocketId }) => {
         if (socket.id !== game.hostId || game.gameState !== 'LOBBY') return;
         
         const player = game.players[aiSocketId];
@@ -1461,19 +1636,22 @@ io.on('connection', (socket) => {
             game.playerCount = Object.keys(game.players).length;
 
             const hostPlayerId = game.players[game.hostId]?.id;
-            io.emit('lobby-update', { players: getClientPlayersList(game.players), settings: game.settings, hostPlayerId });
+            roomEmit('lobby-update', { players: getClientPlayersList(game.players), settings: game.settings, hostPlayerId });
         }
     });
 
-    socket.on('return-to-lobby', () => {
+    onGame('return-to-lobby', () => {
         if (socket.id === game.hostId && (game.gameState === 'RUNNING' || game.gameState === 'FINISHED')) {
             resetGameToLobby(game);
         }
     });
 
-    socket.on('disconnect', () => {
+    onGame('disconnect', () => {
         const disconnectedPlayer = game.players[socket.id];
         if (disconnectedPlayer) {
+            if (game.gameState === 'RUNNING' && game.dbId && socket.data.identity.userId) {
+                db.setResult(game.dbId, socket.data.identity.userId, 'left');
+            }
             if (game.gameState === 'RUNNING') {
                 const disconnectedPlayerId = disconnectedPlayer.id;
                 for (const timelineId in game.multiverse) {
@@ -1495,24 +1673,32 @@ io.on('connection', (socket) => {
             }
 
             if (game.gameState === 'LOBBY') {
-                 io.emit('lobby-update', { players: getClientPlayersList(game.players), settings: game.settings, hostPlayerId: game.players[game.hostId]?.id });
+                 roomEmit('lobby-update', { players: getClientPlayersList(game.players), settings: game.settings, hostPlayerId: game.players[game.hostId]?.id });
             } else {
-                 io.emit('player-list-update', getClientPlayersList(game.players));
+                 roomEmit('player-list-update', getClientPlayersList(game.players));
             }
         }
         
         const humanSocketsLeft = Object.keys(game.players).filter(sid => !sid.startsWith('ai-socket-opponent'));
         if (game.gameState === 'RUNNING' && humanSocketsLeft.length < 1) {
             clearTimeout(game.gameInterval);
-            io.emit('game-over', { winnerId: 'none', reason: 'Not enough players.' });
+            roomEmit('game-over', { winnerId: 'none', reason: 'Not enough players.' });
             resetGameToLobby(game);
         }
+
+        // Nobody human left: the match is gone.
+        if (humanSocketIds(game).length === 0) {
+            destroyGame(game);
+        }
     });
-});
+}
+
 
 if (process.env.NODE_ENV !== 'test') {
-    server.listen(PORT, () => {
-        console.log(`Server is running on port ${PORT}`);
+    db.init().finally(() => {
+        server.listen(PORT, () => {
+            console.log(`Server is running on port ${PORT}`);
+        });
     });
 }
 
@@ -1521,6 +1707,15 @@ if (process.env.NODE_ENV === 'test') {
         // Global Game Object
         getGame: () => game,
         setGame: (newGame) => { game = newGame; },
+
+        // Multiple games
+        games,
+        withGame,
+        roomEmit,
+        humanSocketIds,
+        findOpenLobby,
+        createRegisteredGame,
+        destroyGame,
         
         // Functions
         createNewGame,
