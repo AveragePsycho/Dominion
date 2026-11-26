@@ -51,15 +51,14 @@ class GameController
     public function play(): void
     {
         $gameId = (int) ($_POST['game_id'] ?? 0) ?: null;
-        if ($gameId !== null && (new Game())->find($gameId) === null) {
-            Session::flash('error', 'That game no longer exists.');
+        $game = $gameId !== null ? (new Game())->find($gameId) : null;
+        if ($gameId !== null && ($game === null || $game['status'] === 'finished')) {
+            Session::flash('error', 'That game has ended.');
             redirect('games');
         }
 
-        $params = [];
-        if ($gameId !== null) {
-            $params['game'] = $gameId;
-        }
+        // A game id joins that match; no id hosts a new one.
+        $params = $gameId !== null ? ['game' => $gameId] : ['new' => 1];
         if (Auth::check()) {
             $params['ticket'] = (new GameTicket())->issue(Auth::id(), $gameId);
         }

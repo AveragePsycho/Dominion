@@ -8,7 +8,22 @@
 
 window.onload = function() {
     console.log("Client script loaded!");
-    const socket = io();
+    // The PHP site sends players here with ?game=<id> to join a match, ?new=1 to host one,
+    // and &ticket=<token> when they are logged in. No ticket means playing as a guest.
+    const joinParams = new URLSearchParams(window.location.search);
+    const socket = io({
+        auth: {
+            ticket: joinParams.get('ticket') || undefined,
+            game: joinParams.get('game') || undefined,
+            new: joinParams.get('new') === '1' || undefined,
+        }
+    });
+    // A ticket only works once, so drop it from the address bar (and from history and bookmarks).
+    if (joinParams.has('ticket')) {
+        joinParams.delete('ticket');
+        const query = joinParams.toString();
+        history.replaceState(null, '', window.location.pathname + (query ? '?' + query : ''));
+    }
 
     // --- 1. LOCAL STATE & CONSTANTS ---
 
