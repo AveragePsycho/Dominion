@@ -245,3 +245,195 @@ button.ready {
     background-color: #0069d9;
     border-color: #005cbf;
 }
+
+/* --- AI thoughts debug panel --- */
+#ai-debug-container {
+    background: rgba(30, 30, 30, 0.45);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 10px;
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
+    transition: all 0.3s ease;
+}
+
+#ai-thoughts-list {
+    max-height: 180px;
+    overflow-y: auto;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 11px;
+    color: #a5ffd6;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding-right: 5px;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
+}
+
+#ai-thoughts-list::-webkit-scrollbar {
+    width: 4px;
+}
+
+#ai-thoughts-list::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 2px;
+}
+
+.thought-item {
+    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+    padding-bottom: 4px;
+    line-height: 1.35;
+    word-break: break-word;
+}
+
+.thought-time {
+    color: #ffc107;
+    margin-right: 4px;
+    font-weight: bold;
+}
+
+/* --- Lobby Return and AI Buttons --- */
+#return-lobby-btn {
+    background: rgba(40, 167, 69, 0.15);
+    border: 1px solid rgba(40, 167, 69, 0.45);
+    color: #28a745;
+    font-weight: bold;
+    backdrop-filter: blur(10px);
+    transition: all 0.2s ease;
+    margin-right: 15px;
+}
+
+#return-lobby-btn:hover {
+    background: rgba(40, 167, 69, 0.35);
+    box-shadow: 0 0 10px rgba(40, 167, 69, 0.3);
+}
+
+#add-ai-btn {
+    background-color: #007bff;
+    border-color: #0056b3;
+    font-weight: bold;
+}
+
+#add-ai-btn:hover {
+    background-color: #0069d9;
+}
+
+.player-item-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.player-info {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.ai-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.ai-difficulty-select {
+    background-color: #333;
+    color: #eaeaea;
+    border: 1px solid #555;
+    border-radius: 4px;
+    padding: 2px 4px;
+    font-size: 11px;
+    cursor: pointer;
+    font-family: inherit;
+}
+
+.ai-difficulty-select:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.remove-ai-btn {
+    background-color: #dc3545;
+    border-color: #bd2130;
+    padding: 2px 6px;
+    font-size: 10px;
+    font-weight: bold;
+    border-radius: 3px;
+    text-transform: uppercase;
+}
+
+.remove-ai-btn:hover {
+    background-color: #c82333;
+}
+
+/* --- Premium custom settings slider & collapsible styling --- */
+#customization-container details details {
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    border-radius: 4px;
+    background-color: rgba(255, 255, 255, 0.02);
+    margin-bottom: 5px;
+    transition: all 0.2s ease;
+}
+
+#customization-container details details summary {
+    padding: 6px 10px;
+    font-size: 0.85em;
+    background-color: rgba(255, 255, 255, 0.04);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+    color: #ccc;
+}
+
+#customization-container details details summary:hover {
+    background-color: rgba(255, 255, 255, 0.07);
+    color: #fff;
+}
+
+.config-actions button {
+    background-color: #2b2b2b;
+    border: 1px solid #444;
+    color: #ddd;
+    border-radius: 4px;
+    transition: all 0.2s ease;
+    font-weight: bold;
+}
+
+.config-actions button:hover:not(:disabled) {
+    background-color: #007bff;
+    border-color: #0056b3;
+    color: #fff;
+    box-shadow: 0 0 8px rgba(0, 123, 255, 0.35);
+}
+
+.option-item label {
+    font-size: 0.82em;
+    color: #b5b5b5;
+    flex-grow: 1;
+}
+
+.option-item label span {
+    color: #ffc107;
+    font-weight: bold;
+    font-family: monospace;
+}
+
+.option-item input[type="range"] {
+    width: 90px;
+    margin-left: 10px;
+    cursor: pointer;
+}
+
+#modal-textarea::-webkit-scrollbar {
+    width: 6px;
+}
+#modal-textarea::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 3px;
+}

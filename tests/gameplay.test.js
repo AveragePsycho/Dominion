@@ -464,6 +464,99 @@ describe('Dominion Gameplay Testing Suite', () => {
             expect(timeline.currentState.board[0][1].army).toBe(39);
         });
 
+        test('attacking armies colliding head-on in transit resolves symmetrically with larger force surviving', () => {
+            const timeline = game.multiverse['timeline-alpha'];
+
+            // Setup Player 1 at [0][0] with 100 armies
+            timeline.currentState.board[0][0] = { type: TILE_TYPE.EMPTY, ownerId: 1, army: 100 };
+            // Setup Player 2 at [0][1] with 40 armies
+            timeline.currentState.board[0][1] = { type: TILE_TYPE.EMPTY, ownerId: 2, army: 40 };
+
+            // Player 1 orders move [0][0] -> [0][1] (sends 99 armies)
+            const action1 = {
+                path: [
+                    { row: 0, col: 0 },
+                    { row: 0, col: 1 }
+                ],
+                isSplit: false
+            };
+            processMove(1, action1, 'timeline-alpha', game);
+
+            // Player 2 orders move [0][1] -> [0][0] (sends 39 armies)
+            const action2 = {
+                path: [
+                    { row: 0, col: 1 },
+                    { row: 0, col: 0 }
+                ],
+                isSplit: false
+            };
+            processMove(2, action2, 'timeline-alpha', game);
+
+            // Run single tick logic 2 times (MOVE_TICKS = 2)
+            runSingleTickLogic(timeline.currentState, 'timeline-alpha', game);
+            runSingleTickLogic(timeline.currentState, 'timeline-alpha', game);
+
+            // Winner is Player 1 (99 armies > 39 armies)
+            // Remaining army is 99 - 39 = 60.
+            // Arrives at [0][1] which has Player 2's 1 left-behind army.
+            // Attacks and captures [0][1] with 60 - 1 = 59.
+            expect(timeline.currentState.board[0][1].ownerId).toBe(1);
+            expect(timeline.currentState.board[0][1].army).toBe(59);
+
+            // Player 2's move was completely wiped out.
+            // Player 1 left 1 army behind at [0][0].
+            expect(timeline.currentState.board[0][0].ownerId).toBe(1);
+            expect(timeline.currentState.board[0][0].army).toBe(1);
+
+            // Moves array should be empty
+            expect(timeline.currentState.moves).toHaveLength(0);
+        });
+
+        test('attacking armies colliding head-on in transit with equal sizes results in total wipeout', () => {
+            const timeline = game.multiverse['timeline-alpha'];
+
+            // Setup Player 1 at [0][0] with 50 armies
+            timeline.currentState.board[0][0] = { type: TILE_TYPE.EMPTY, ownerId: 1, army: 50 };
+            // Setup Player 2 at [0][1] with 50 armies
+            timeline.currentState.board[0][1] = { type: TILE_TYPE.EMPTY, ownerId: 2, army: 50 };
+
+            // Player 1 orders move [0][0] -> [0][1] (sends 49 armies)
+            const action1 = {
+                path: [
+                    { row: 0, col: 0 },
+                    { row: 0, col: 1 }
+                ],
+                isSplit: false
+            };
+            processMove(1, action1, 'timeline-alpha', game);
+
+            // Player 2 orders move [0][1] -> [0][0] (sends 49 armies)
+            const action2 = {
+                path: [
+                    { row: 0, col: 1 },
+                    { row: 0, col: 0 }
+                ],
+                isSplit: false
+            };
+            processMove(2, action2, 'timeline-alpha', game);
+
+            // Run single tick logic 2 times (MOVE_TICKS = 2)
+            runSingleTickLogic(timeline.currentState, 'timeline-alpha', game);
+            runSingleTickLogic(timeline.currentState, 'timeline-alpha', game);
+
+            // Equal sizes (49 vs 49) results in total wipeout of both moving armies.
+            // Player 1 left 1 army behind at [0][0].
+            expect(timeline.currentState.board[0][0].ownerId).toBe(1);
+            expect(timeline.currentState.board[0][0].army).toBe(1);
+
+            // Player 2 left 1 army behind at [0][1].
+            expect(timeline.currentState.board[0][1].ownerId).toBe(2);
+            expect(timeline.currentState.board[0][1].army).toBe(1);
+
+            // Moves array should be empty
+            expect(timeline.currentState.moves).toHaveLength(0);
+        });
+
         test('capturing an enemy general conquers all of their territory and defeats them', () => {
             // Give Player 2 some lands
             timeline.currentState.board[0][1] = { type: TILE_TYPE.EMPTY, ownerId: 2, army: 5 };
